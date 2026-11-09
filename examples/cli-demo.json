@@ -1,0 +1,28 @@
+{
+  "title": "Example: a CLI story cut that needs no screenshots (fictional tool 'jot')",
+  "target_duration": 30,
+  "format": "landscape",
+  "palette": "auto",
+  "music": "auto",
+  "music_mood": "inspiring",
+  "scenes": [
+    { "type": "title", "role": "hook", "duration": 2.5, "text": "Your notes are\nin six apps." },
+    { "type": "shot", "role": "hook", "duration": 3, "transition": "blur", "device": "window", "title": "zsh", "move": "hero-turn",
+      "terminal": { "lines": [ { "cmd": "brew install jot" }, { "out": "jot 2.1.0 installed" } ] } },
+    { "type": "title", "role": "reveal", "duration": 2.5, "text": "jot", "size": "large", "subtitle": "Notes that live in your terminal." },
+    { "type": "shot", "role": "benefit", "duration": 4, "transition": "whip", "device": "window", "title": "zsh", "move": "macro-drift",
+      "terminal": { "lines": [ { "cmd": "jot new \"Launch plan\"" }, { "out": "created  notes/launch-plan.md" } ] },
+      "caption": { "text": "Capture in a keystroke.", "sub": "No app to open. No window to find.", "side": "over" } },
+    { "type": "shot", "role": "benefit", "duration": 4, "device": "window", "title": "zsh", "move": "macro-rack", "dir": -1,
+      "terminal": { "lines": [ { "cmd": "jot find launch" }, { "out": "launch-plan.md     3 matches" }, { "out": "q3-roadmap.md      1 match" } ] },
+      "caption": { "text": "Find it in a second.", "sub": "Full-text search across every note.", "side": "over" } },
+    { "type": "shot", "role": "benefit", "duration": 4, "transition": "blur", "device": "window", "title": "zsh", "move": "sweep",
+      "terminal": { "lines": [ { "cmd": "jot sync" }, { "out": "pushed  12 notes" }, { "out": "up to date" } ] },
+      "caption": { "text": "Yours, everywhere.", "sub": "Plain markdown files, synced with git.", "side": "over" } },
+    { "type": "title", "role": "proof", "duration": 2.5, "transition": "dip", "text": "Plain text.\nForever." },
+    { "type": "shot", "duration": 3, "device": "window", "title": "zsh", "move": "pull-back",
+      "terminal": { "lines": [ { "cmd": "jot ls --recent" }, { "out": "today      launch-plan.md" }, { "out": "yesterday  standup.md" } ] } },
+    { "type": "end", "role": "cta", "duration": 4.5, "transition": "blur", "name": "jot", "tagline": "Notes that live in your terminal.",
+      "cta": "brew install jot", "url": "github.com/example/jot" }
+  ]
+}

@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--FONTFACES-->
+<style>
+html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+#stage { position: relative; overflow: hidden; font-family: "PF Body", "PF Display", sans-serif;
+  -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; }
+#bg, #bgfx { position: absolute; inset: 0; }
+.scene { position: absolute; inset: 0; visibility: hidden; }
+.cam { position: absolute; inset: 0; transform-style: preserve-3d; }
+.dev { position: absolute; left: 0; top: 0; transform-origin: 0 0; transform-style: preserve-3d; }
+.layer { position: absolute; left: 0; top: 0; }
+.face { position: absolute; left: 0; top: 0; overflow: hidden; }
+.screen { position: absolute; overflow: hidden; }
+.screen img { display: block; width: 100%; height: auto; }
+.light { position: absolute; inset: 0; pointer-events: none; }
+.term { font-family: "PF Mono", ui-monospace, monospace; white-space: pre-wrap; font-variant-ligatures: none; }
+.caret { display: inline-block; width: .56em; height: 1.08em; vertical-align: -0.2em; }
+.title { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; }
+.disp { font-family: "PF Display", "PF Body", sans-serif; }
+.line { display: block; overflow: hidden; padding: 0.06em 0.08em 0.14em; margin: -0.06em -0.08em -0.14em; }
+.line > span { display: inline-block; will-change: transform; transform-origin: 50% 80%; }
+.cap { position: absolute; display: flex; flex-direction: column; justify-content: center; }
+.scrim { position: absolute; left: 0; right: 0; bottom: 0; height: 60%; pointer-events: none; }
+.piece { position: absolute; left: 0; top: 0; background-repeat: no-repeat; transform-origin: 50% 50%; }
+.end-logo { display: block; width: auto; }
+.btn { display: inline-flex; align-items: center; justify-content: center; }
+.acc { color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="stage"><div id="bg"></div><div id="bgfx"></div></div>
+<script>
+/* Deterministic renderer: renderAt(t) derives every style from t alone.
+   Everything visual comes from SB.style (the project's own aesthetic) - nothing is hard-coded
+   to one look. render.py resolves the style and injects @font-face rules for
+   "PF Display", "PF Body" and "PF Mono". */
+const SB = window.__STORYBOARD__;
+const W = SB.width, H = SB.height, ST = SB.style, C = ST.colors, TY = ST.type;
+const stage = document.getElementById('stage');
+stage.style.width = W + 'px'; stage.style.height = H + 'px'; stage.style.color = C.text;
+document.body.style.background = C.bg;
+document.documentElement.style.setProperty('--accent', C.highlight || C.accent);
+const U = Math.min(W, H) / 100;            // 1% of the short side
+const PORTRAIT = H > W;
+const FS = TY.scale ?? 1;                  // global type scale
+
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, p) => a + (b - a) * p;
+const backK = 1.70158 * 1.15;
+const ease = { sine: p => -(Math.cos(Math.PI * p) - 1) / 2, cubic: p => p < .5 ? 4*p*p*p : 1 - Math.pow(-2*p + 2, 3) / 2,
+  outCubic: p => 1 - Math.pow(1 - p, 3), outExpo: p => p >= 1 ? 1 : 1 - Math.pow(2, -10 * p), linear: p => p,
+  outQuint: p => 1 - Math.pow(1 - p, 5), inCubic: p => p * p * p,
+  outBack: p => 1 + (backK + 1) * Math.pow(p - 1, 3) + backK * Math.pow(p - 1, 2) };
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// *word* -> accent colour (the project's own highlight colour, never a gradient)
+const rich = s => esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
+const el = (tag, cls, css) => { const e = document.createElement(tag); if (cls) e.className = cls; if (css) e.style.cssText = css; return e; };
+const rad = d => d * Math.PI / 180;
+const hexA = (hex, a) => { const h = hex.replace('#', ''); const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h.slice(0, 6), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
+const caseT = s => TY.case === 'upper' ? String(s).toUpperCase() : TY.case === 'lower' ? String(s).toLowerCase() : s;
+
+/* ---------- motion personalities ----------
+   Each project gets one. It sets how type enters, how fast things settle and how much they bounce. */
+const MOTION = {
+  cinematic: { text: 'rise', tDur: .75, tEase: 'outExpo', pDur: .95, pEase: 'outExpo', blur: 10, cam: 1, stagger: 1 },
+  snappy:    { text: 'rise', tDur: .42, tEase: 'outQuint', pDur: .45, pEase: 'outQuint', blur: 0, cam: 1.25, stagger: .6 },
+  playful:   { text: 'pop',  tDur: .55, tEase: 'outBack', pDur: .6, pEase: 'outBack', blur: 0, cam: 1.1, stagger: .8 },
+  calm:      { text: 'fade', tDur: 1.1, tEase: 'outCubic', pDur: 1.3, pEase: 'outCubic', blur: 6, cam: .75, stagger: 1.4 },
+};
+const MO = MOTION[ST.motion] || MOTION.cinematic;
+
+/* ---------- beat grid + kinetic type ---------- */
+const BEATS = SB.beats || [];
+function beatTimes(sceneStart, n, from = 0.12, within = null) {
+  const out = [];
+  for (const b of BEATS) { if (b >= sceneStart + from - 1e-6) out.push(b - sceneStart); if (out.length >= n) break; }
+  while (out.length < n) out.push((out.length ? out[out.length - 1] + 0.32 * MO.stagger : from));
+  // Everything must have landed by `within` seconds (scenes get shortened to hit the beat):
+  // if the beat-spaced entrances run long, space them evenly instead.
+  if (within && n > 1 && out[n - 1] > within) for (let i = 0; i < n; i++) out[i] = from + (within - from) * i / (n - 1);
+  return out;
+}
+function makeLines(parent, text, cls, css, display = true) {
+  const box = el('div', (display ? 'disp ' : '') + cls, css); parent.appendChild(box);
+  const lines = String(text).split('\n').map(t => {
+    const ln = el('span', 'line'); const inner = el('span'); inner.innerHTML = rich(caseT(t)); ln.appendChild(inner); box.appendChild(ln);
+    return inner;
+  });
+  return { box, lines };
+}
+function enter(node, p, kind = MO.text, dist = 110) {
+  // p: raw 0..1 progress. Applies the project's motion personality to one element.
+  const e = ease[MO.tEase](clamp(p));
+  if (kind === 'rise') { node.style.transform = `translateY(${(1 - e) * dist}%)`; node.style.opacity = clamp(p * 1.6); }
+  else if (kind === 'pop') { node.style.transform = `translateY(${(1 - e) * 40}%) scale(${lerp(0.6, 1, e)}) rotate(${(1 - e) * -4}deg)`; node.style.opacity = clamp(p * 2.5); }
+  else { node.style.transform = `translateY(${(1 - e) * 14}px)`; node.style.opacity = e; }
+  if (MO.blur) node.style.filter = p < 1 ? `blur(${(1 - e) * MO.blur}px)` : 'none';
+}
+function riseLines(lines, lt, times) {
+  lines.forEach((ln, i) => enter(ln, (lt - times[Math.min(i, times.length - 1)]) / MO.tDur));
+}
+function fadeIn(node, lt, at, maxOp = 1) {
+  const q = ease.outCubic(clamp((lt - at) / (MO.tDur * 1.1)));
+  node.style.opacity = q * maxOp; node.style.transform = `translateY(${(1 - q) * 12}px)`;
+}
+const textAlign = TY.align || 'center';
+const titleBoxCss = () => textAlign === 'left'
+  ? `align-items:flex-start;text-align:left;padding:0 ${W*0.09}px;`
+  : `align-items:center;text-align:center;`;
+const headCss = (size) => `font-size:${size * U * FS}px;font-weight:${TY.weight};letter-spacing:${TY.tracking}em;line-height:${TY.line_height};max-width:${textAlign === 'left' ? 82 : 84}%;`;
+const subCss = (size) => `font-size:${size * U * FS}px;font-weight:${TY.sub_weight};color:${C.muted};letter-spacing:${Math.max(-0.01, TY.tracking / 3)}em;line-height:1.3;margin-top:0.9em;max-width:${PORTRAIT ? 86 : 64}%;`;
+
+/* ---------- camera presets ----------
+   m = magnification (1 = subject fits the frame; for full-bleed, 1 = fills it), rx/ry/rz = rotation,
+   fx/fy = focal point on the screen (0..1), dfx/dfy = drift, x/y = frame offset, dof, rack. */
+const MOVES = {
+  // 3D moves (device / panel)
+  'macro-drift': { ease: 'sine', from: { m: 3.0, rx: 36, ry: -20, rz: 9, dfx: -0.07, dof: 1 }, to: { m: 3.25, rx: 32, ry: -13, rz: 7, dfx: 0.07, dof: 1 } },
+  'macro-rack':  { ease: 'sine', from: { m: 2.5, rx: 44, ry: 12, rz: -7, dfy: 0.03, dof: 1, rack: -0.22 }, to: { m: 2.7, rx: 40, ry: 8, rz: -6, dfy: -0.02, dof: 1, rack: 0.06 } },
+  'sweep':       { ease: 'sine', from: { m: 1.9, rx: 22, ry: -36, rz: 5, dfx: -0.16, dof: .8 }, to: { m: 2.05, rx: 26, ry: -20, rz: 3, dfx: 0.12, dof: .8 } },
+  'tilt-up':     { ease: 'sine', from: { m: 2.3, rx: 58, ry: -8, rz: -13, dfy: 0.07, dof: 1 }, to: { m: 2.15, rx: 42, ry: -14, rz: -9, dfy: -0.04, dof: 1 } },
+  'pull-back':   { ease: 'cubic', from: { m: 2.6, rx: 30, ry: -22, rz: 7, dof: 1 }, to: { m: 0.93, rx: 7, ry: -13, rz: 0, fx: .5, fy: .5, y: .01, dof: .15 } },
+  'float':       { ease: 'sine', from: { m: 0.94, rx: 7, ry: -17, rz: -1.5, fx: .5, fy: .5, y: .02, dof: .12 }, to: { m: 1.0, rx: 4, ry: 9, rz: 1, fx: .5, fy: .5, y: 0, dof: .12 } },
+  'hero-turn':   { ease: 'outQuint', from: { m: 0.86, rx: 12, ry: 62, rz: 0, fx: .5, fy: .5, x: .12, dof: .25 }, to: { m: 1.0, rx: 4, ry: -9, rz: 0, fx: .5, fy: .5, x: 0, dof: .12 } },
+  'tilt':        { ease: 'sine', from: { m: 0.96, rx: 12, ry: -14, rz: 0, fx: .5, fy: .5 }, to: { m: 1.0, rx: 6, ry: 10, rz: 0, fx: .5, fy: .5 } },
+  // flat moves (any staging; the only ones used for full-bleed)
+  'push-in':     { ease: 'cubic', from: { m: 1.0, rx: 6, ry: -10, rz: 0, fx: .5, fy: .5, dof: .1 }, to: { m: 1.9, rx: 18, ry: -16, rz: 3, dof: .8 } },
+  'drift':       { ease: 'sine', from: { m: 1.0, fx: .5, fy: .5, dfx: -0.02 }, to: { m: 1.07, fx: .5, fy: .5, dfx: 0.02 } },
+  'zoom-in':     { ease: 'cubic', from: { m: 1.0, fx: .5, fy: .5 }, to: { m: 2.1 } },
+  'zoom-out':    { ease: 'cubic', from: { m: 2.1 }, to: { m: 1.0, fx: .5, fy: .5 } },
+  'pan-down':    { ease: 'sine', from: { m: 1.6, dfy: -0.18 }, to: { m: 1.6, dfy: 0.18 } },
+  'pan-across':  { ease: 'sine', from: { m: 1.7, dfx: -0.2 }, to: { m: 1.7, dfx: 0.2 } },
+  'rise':        { ease: 'outBackish', from: { m: 0.94, y: 0.55, fx: .5, fy: .5 }, to: { m: 1.0, y: 0, fx: .5, fy: .5 } },
+};
+ease.outBackish = p => MO.pEase === 'outBack' ? ease.outBack(clamp(p * 1.8)) : ease.outExpo(clamp(p * 1.6));
+const CAM_DEFAULT = { m: 1, rx: 0, ry: 0, rz: 0, fx: .5, fy: .5, dfx: 0, dfy: 0, x: 0, y: 0, dof: 0, rack: 0 };
+
+function camAt(shot, p, dynFocus, flat) {
+  const mv = shot.camera || MOVES[shot.move || (flat ? 'drift' : 'float')];
+  if (!mv) throw new Error('Unknown move: ' + shot.move);
+  const pp = clamp(p * MO.cam);  // snappier personalities complete their moves sooner
+  const e = ease[mv.ease || 'sine'](mv.ease === 'outBackish' ? p : pp);
+  const dir = shot.dir === -1 ? -1 : 1, k = shot.intensity ?? 1;
+  const [ffx, ffy] = shot.focus || dynFocus || [.5, .5];
+  const a = { ...CAM_DEFAULT, fx: ffx, fy: ffy, ...mv.from }, b = { ...CAM_DEFAULT, fx: ffx, fy: ffy, ...mv.to };
+  const c = {};
+  for (const key in a) c[key] = lerp(a[key], b[key], e);
+  c.ry *= dir; c.rz *= dir; c.dfx *= dir; c.x *= dir;
+  c.rx *= k; c.ry *= k; c.rz *= k; c.m = 1 + (c.m - 1) * k;
+  c.fx = clamp(c.fx + c.dfx); c.fy = clamp(c.fy + c.dfy);
+  if (flat === 'none') { c.rx = c.ry = c.rz = 0; c.dof = 0; c.m = Math.max(1, c.m); }
+  else if (flat === 'panel') { const tl = ST.tilt ?? 0.6; c.rx *= tl; c.ry *= tl; c.rz *= tl; c.dof *= ST.dof ?? 0; }
+  return c;
+}
+
+/* ---------- frames around the content ----------
+   phone/browser/window: hardware-ish frames; panel: a flat card using the project's own radius,
+   border and shadow; none: full-bleed (the UI itself is the frame). */
+function cardShadow(scale) {
+  const sc = ST.shadow_color || 'rgba(0,0,0,.35)';
+  switch (ST.shadow) {
+    case 'none': return 'none';
+    case 'hard': return `${8*scale}px ${8*scale}px 0 0 ${ST.border_color || C.text}`;
+    case 'glow': return `0 0 ${60*scale}px ${hexA(C.accent, .45)}`;
+    default: return `0 ${20*scale}px ${60*scale}px ${sc}, 0 ${4*scale}px ${12*scale}px ${sc}`;
+  }
+}
+function buildFace(spec, sw, sh, content, dpr) {
+  const face = el('div', 'face');
+  const dark = ST.theme === 'dark';
+  if (spec.kind === 'phone') {
+    const bz = sw * 0.045, r = sw * 0.15;
+    face.style.cssText = `width:${sw + 2*bz}px;height:${sh + 2*bz}px;border-radius:${r}px;background:#0b0b0c;
+      box-shadow: inset 0 0 0 ${sw*0.006}px #4a4a50, inset 0 0 0 ${sw*0.010}px #1b1b1e;`;
+    const scr = el('div', 'screen', `left:${bz}px;top:${bz}px;width:${sw}px;height:${sh}px;border-radius:${r - bz}px;background:${C.bg};`);
+    scr.appendChild(content);
+    scr.appendChild(el('div', '', `position:absolute;left:${sw/2 - sw*0.016}px;top:${sw*0.03}px;width:${sw*0.032}px;height:${sw*0.032}px;border-radius:50%;background:#050506;`));
+    face.appendChild(scr);
+    Object.assign(face, { _w: sw + 2*bz, _h: sh + 2*bz, _r: r, _sx: bz, _sy: bz });
+  } else if (spec.kind === 'panel' || spec.kind === 'none') {
+    const r = spec.kind === 'none' ? 0 : (ST.radius ?? 12) * dpr;
+    const bw = spec.kind === 'none' ? 0 : (ST.border_width ?? 0) * dpr;
+    face.style.cssText = `width:${sw}px;height:${sh}px;border-radius:${r}px;background:${C.surface};overflow:hidden;
+      box-shadow:${bw ? `inset 0 0 0 ${bw}px ${ST.border_color || C.border}` : 'none'};`;
+    const scr = el('div', 'screen', `left:0;top:0;width:${sw}px;height:${sh}px;border-radius:${r}px;`);
+    scr.appendChild(content); face.appendChild(scr);
+    if (bw) face.appendChild(el('div', 'light', `border-radius:${r}px;box-shadow:inset 0 0 0 ${bw}px ${ST.border_color || C.border};`));
+    Object.assign(face, { _w: sw, _h: sh, _r: r, _sx: 0, _sy: 0, _flat: true });
+  } else {  // browser / window frame in the project's own surface colours
+    const bar = sw * 0.032, r = Math.max(sw * 0.008, (ST.radius ?? 10) * dpr * 0.8);
+    const chrome = spec.kind === 'window' ? C.surface : (dark ? C.surface : '#f3f3f5');
+    const ink = dark ? 'rgba(255,255,255,.18)' : 'rgba(0,0,0,.14)';
+    face.style.cssText = `width:${sw}px;height:${sh + bar}px;border-radius:${r}px;background:${chrome};box-shadow: inset 0 0 0 ${Math.max(1, sw*0.0008)}px ${ink};`;
+    const top = el('div', '', `position:absolute;left:0;top:0;width:${sw}px;height:${bar}px;display:flex;align-items:center;gap:${bar*0.22}px;padding-left:${bar*0.5}px;box-sizing:border-box;`);
+    for (let i = 0; i < 3; i++) top.appendChild(el('i', '', `display:block;width:${bar*0.26}px;height:${bar*0.26}px;border-radius:50%;background:${ink};`));
+    if (spec.kind === 'browser') {
+      const url = el('div', '', `position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);height:${bar*0.56}px;width:${sw*0.34}px;border-radius:${bar*0.16}px;background:${ink};color:${C.muted};font-size:${bar*0.3}px;display:flex;align-items:center;justify-content:center;font-weight:500;`);
+      url.textContent = spec.url || ''; top.appendChild(url);
+    } else if (spec.title) {
+      const tt = el('div', '', `position:absolute;left:0;right:0;text-align:center;color:${C.muted};font-size:${bar*0.32}px;font-weight:500;`);
+      tt.textContent = spec.title; top.appendChild(tt);
+    }
+    face.appendChild(top);
+    const scr = el('div', 'screen', `left:0;top:${bar}px;width:${sw}px;height:${sh}px;border-radius:0 0 ${r}px ${r}px;background:${spec.kind === 'window' ? C.surface : '#fff'};`);
+    scr.appendChild(content); face.appendChild(scr);
+    Object.assign(face, { _w: sw, _h: sh + bar, _r: r, _sx: 0, _sy: bar });
+  }
+  if (!face._flat && (ST.lighting ?? ST.motion === 'cinematic')) {
+    face.appendChild(el('div', 'light', `border-radius:${face._r}px;background: linear-gradient(180deg, rgba(255,255,255,.05) 0%, rgba(0,0,0,0) 35%, rgba(0,0,0,.45) 100%);`));
+  }
+  const sheen = el('div', 'light', `border-radius:${face._r}px;background:linear-gradient(115deg, transparent 38%, rgba(255,255,255,${face._flat ? 0 : .07}) 48%, rgba(255,255,255,0) 58%);background-size:300% 100%;`);
+  face.appendChild(sheen); face._sheen = sheen;
+  return face;
+}
+
+function screenContent(shot, sw, sh) {
+  if (shot.terminal) {
+    const t = shot.terminal, fs = sw * 0.034, pad = fs * 1.5, lh = fs * 1.6;
+    const node = el('div', 'term', `padding:${pad}px ${pad*1.3}px;font-size:${fs}px;line-height:${lh}px;width:${sw}px;height:${sh}px;box-sizing:border-box;color:${C.text};background:${C.surface};`);
+    const cps = t.typing_speed || 26; let t0 = 0.5; const tl = [];
+    for (const l of t.lines || []) {
+      if (l.cmd != null) { const d = l.cmd.length / cps; tl.push({ k: 'cmd', s: l.cmd, at: t0, d }); t0 += d + 0.4; }
+      else { tl.push({ k: 'out', s: l.out ?? '', at: t0 }); t0 += 0.18; }
+    }
+    const lineAt = lt => {
+      let row = 0;
+      for (let i = 0; i < tl.length; i++) {
+        const it = tl[i], next = tl[i + 1];
+        if (lt < it.at) break;
+        const endAt = it.k === 'cmd' ? it.at + it.d : it.at;
+        row = i + (next ? ease.cubic(clamp((lt - endAt) / Math.max(0.15, next.at - endAt))) : 0);
+      }
+      return row;
+    };
+    const focusAt = lt => {
+      const row = lineAt(lt), cur = tl[Math.min(tl.length - 1, Math.floor(row))];
+      const chars = cur ? (cur.k === 'cmd' ? Math.floor(clamp((lt - cur.at) / cur.d) * cur.s.length) + 2 : cur.s.length) : 0;
+      const x = pad * 1.3 + Math.min(chars, 34) * fs * 0.6 * 0.6;
+      return [clamp(x / sw, 0.12, 0.6), clamp((pad + row * lh + lh / 2) / sh, 0.1, 0.9)];
+    };
+    const pr = `<span style="color:${C.accent}">${esc(t.prompt || '$')}</span>`;
+    return { node, focusAt, update(lt) {
+      let html = '', typing = false;
+      for (const it of tl) {
+        if (lt < it.at) break;
+        if (it.k === 'cmd') {
+          const n = Math.floor(clamp((lt - it.at) / it.d) * it.s.length);
+          html += `${pr} ${esc(it.s.slice(0, n))}`;
+          if (n < it.s.length) { html += `<span class="caret" style="background:${C.text}"></span>`; typing = true; break; }
+          html += '\n';
+        } else html += `<span style="color:${C.muted}">${esc(it.s)}</span>\n`;
+      }
+      if (!typing) html += `${pr} ` + (Math.floor(lt * 1.6) % 2 ? '' : `<span class="caret" style="background:${C.text}"></span>`);
+      node.innerHTML = html;
+    }};
+  }
+  const img = el('img'); img.src = shot.screen; img.style.width = sw + 'px';
+  const scroll = shot.scroll || [0, 0];
+  return { node: img, update(lt, p) {
+    const over = Math.max(0, img._natH - sh);
+    img.style.transform = `translateY(${-over * lerp(scroll[0], scroll[1], ease.sine(clamp(p)))}px)`;
+  }};
+}
+
+function frameSize(shot) {
+  const kind = shot.device || ST.staging || 'panel';
+  if (shot.terminal) return { kind: kind === 'phone' || kind === 'none' ? 'window' : kind, sw: 1800, sh: 980 };
+  const nw = shot._nat[0], nh = shot._nat[1];
+  if (kind === 'phone') { const sw = Math.max(nw, 1080); return { kind, sw, sh: Math.min(nh * sw / nw, sw * 2.17) }; }
+  if (kind === 'panel' || kind === 'none') {
+    // keep native pixels; crop very tall pages to a sensible window (use "scroll" to pan the rest)
+    // tall pages become a readable window onto the page; use "scroll" to travel down it
+    const maxAR = kind === 'none' ? H / W : (shot.full_height ? 2.2 : (nw < nh ? 1.3 : 0.75));
+    return { kind, sw: nw, sh: Math.min(nh, nw * maxAR) };
+  }
+  const sw = Math.max(nw, 2400); return { kind, sw, sh: Math.min(nh * sw / nw, sw * 0.625) };
+}
+
+function buildWall(dev, fw, fh, r, T) {
+  const back = el('div', 'layer', `width:${fw}px;height:${fh}px;border-radius:${r}px;background:#101012;transform:translateZ(${-T}px);`);
+  dev.appendChild(back);
+  const pts = [], K = 6;
+  const corner = (cx, cy, a0) => { for (let k = 0; k <= K; k++) { const a = a0 + (Math.PI / 2) * k / K; pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); } };
+  corner(fw - r, r, -Math.PI / 2); corner(fw - r, fh - r, 0); corner(r, fh - r, Math.PI / 2); corner(r, r, Math.PI);
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % pts.length];
+    const len = Math.hypot(x2 - x1, y2 - y1); if (len < 0.5) continue;
+    const ang = Math.atan2(y2 - y1, x2 - x1);
+    const nx = Math.sin(ang), ny = -Math.cos(ang);
+    const lit = clamp(0.5 + 0.5 * (-0.55 * nx - 0.8 * ny));
+    const hi = Math.round(lerp(40, 120, lit)), mid = Math.round(lerp(18, 40, lit));
+    dev.appendChild(el('div', 'layer', `width:${len + 1}px;height:${T}px;transform-origin:0 0;
+      transform:translate3d(${x1}px,${y1}px,0) rotateZ(${ang}rad) rotateX(-90deg);
+      background:linear-gradient(180deg, rgb(${hi},${hi},${hi+4}) 0%, rgb(${mid},${mid},${mid+3}) 18%, #0c0c0e 70%, rgb(${mid},${mid},${mid+3}) 100%);`));
+  }
+}
+
+/* ---------- captions (shared by shot and pieces) ---------- */
+function buildCaption(root, cap, wide) {
+  if (!cap) return null;
+  cap = typeof cap === 'string' ? { text: cap } : cap;
+  const side = PORTRAIT ? 'over' : (cap.side || 'left');
+  const out = { side, xo: 0, shrink: 1 };
+  let wrap;
+  if (side === 'over') {
+    root.appendChild(el('div', 'scrim', `background:linear-gradient(0deg, ${hexA(C.bg, .92)} 0%, ${hexA(C.bg, 0)} 100%);`));
+    wrap = el('div', 'cap', `left:${7*U}px;right:${7*U}px;bottom:${8*U}px;text-align:left;align-items:flex-start;`);
+    out.lines = makeLines(wrap, cap.text, '', headCss(PORTRAIT ? 7.2 : 7.4).replace(/max-width:[^;]+;/, '')).lines;
+  } else {
+    out.xo = (side === 'left' ? 1 : -1) * (wide ? 0.19 : 0.2);
+    out.shrink = wide ? 0.7 : 0.94;
+    const pos = side === 'left' ? `left:${W*0.07}px;` : `right:${W*0.06}px;`;
+    wrap = el('div', 'cap', pos + `top:0;bottom:0;width:${W*(wide ? 0.33 : 0.38)}px;text-align:left;align-items:flex-start;`);
+    out.lines = makeLines(wrap, cap.text, '', headCss(8.2).replace(/max-width:[^;]+;/, '')).lines;
+  }
+  if (cap.sub) { out.sub = el('div', '', subCss(3.3) + 'max-width:100%;'); out.sub.textContent = cap.sub; wrap.appendChild(out.sub); }
+  root.appendChild(wrap);
+  out.at = cap.at ?? 0.25;
+  out.render = (lt, start, d) => {
+    out.times = out.times || beatTimes(start, out.lines.length + 1, out.at, d * 0.45);
+    riseLines(out.lines, lt, out.times);
+    if (out.sub) fadeIn(out.sub, lt, out.times[out.lines.length]);
+  };
+  return out;
+}
+
+/* ---------- scenes ---------- */
+const builders = {
+  shot(s) {
+    const root = el('div', 'scene');
+    const cam = el('div', 'cam', `perspective:${W * 1.5}px;perspective-origin:50% 50%;`); root.appendChild(cam);
+    const { kind, sw, sh } = frameSize(s);
+    const dpr = s.dpr ?? (kind === 'phone' ? 3 : 2);
+    const spec = { kind, url: s.url, title: s.title };
+    const dev = el('div', 'dev'); cam.appendChild(dev);
+    const c1 = screenContent(s, sw, sh);
+    const sharp = buildFace(spec, sw, sh, c1.node, dpr);
+    const fw = sharp._w, fh = sharp._h;
+    const flat = kind === 'panel' || kind === 'none' ? kind : null;
+    let soft = null, c2 = null, shadowPlate = null;
+    if (kind === 'phone') buildWall(dev, fw, fh, sharp._r, fw * 0.085);
+    else if (!flat) buildWall(dev, fw, fh, sharp._r, fw * 0.008);
+    else if (kind === 'panel' && ST.shadow !== 'none') {
+      // the card's shadow lives on a plate behind it so it tilts with the card
+      dev.appendChild(el('div', 'layer', `width:${fw}px;height:${fh}px;border-radius:${sharp._r}px;box-shadow:${cardShadow(1)};transform:translateZ(-0.5px);background:${C.surface};`));
+      shadowPlate = dev.lastChild;
+    }
+    const useDof = !flat || (kind === 'panel' && (ST.dof ?? 0) > 0);
+    if (useDof) { c2 = screenContent(s, sw, sh); soft = buildFace(spec, sw, sh, c2.node, dpr); soft.style.transform = 'translateZ(-0.3px)'; dev.appendChild(soft); }
+    dev.appendChild(sharp);
+    let fitScale;
+    if (kind === 'none') fitScale = Math.max(W / fw, H / fh);
+    else if (kind === 'phone') fitScale = (H * 0.8) / fh;
+    else if (kind === 'panel') fitScale = Math.min((W * (fh > fw ? 0.5 : 0.7)) / fw, (H * 0.78) / fh);
+    else fitScale = Math.min((W * 0.66) / fw, (H * 0.74) / fh);
+    const cap = buildCaption(root, s.caption, kind !== 'phone' && !(kind === 'panel' && fh > fw));
+    if (cap && kind === 'none' && cap.side !== 'over') { cap.xo = 0; cap.shrink = 1; }
+    const xo = cap ? cap.xo : 0, shrink = cap ? cap.shrink : 1;
+    if (shadowPlate) shadowPlate.style.boxShadow = cardShadow((H / 1080) / (fitScale * shrink));
+    return { root, render(lt, d) {
+      if (cap) cap.render(lt, this.start, d);
+      const p = lt / d;
+      const c = camAt(s, p, c1.focusAt ? c1.focusAt(lt) : null, flat);
+      const S = fitScale * c.m * shrink;
+      const fxp = sharp._sx + c.fx * sw, fyp = sharp._sy + c.fy * sh;
+      let ox, oy;
+      if (kind === 'none') {
+        // full-bleed: keep the frame covered while moving toward the focus
+        const vw = W / S, vh = H / S;
+        ox = clamp(fxp, vw / 2, fw - vw / 2); oy = clamp(fyp, vh / 2, fh - vh / 2);
+        if (vw >= fw) ox = fw / 2; if (vh >= fh) oy = fh / 2;
+      } else {
+        const wFit = clamp((2 - c.m) / 1);
+        ox = lerp(fxp, fw / 2, wFit); oy = lerp(fyp, fh / 2, wFit);
+      }
+      dev.style.transform = `translate3d(${W/2 + (c.x + xo)*W}px, ${H/2 + c.y*H}px, 0) rotateZ(${c.rz}deg) rotateX(${c.rx}deg) rotateY(${c.ry}deg) scale3d(${S},${S},${S}) translate(${-ox}px, ${-oy}px)`;
+      if (soft) {
+        const gx = -Math.sin(rad(c.ry)) * Math.cos(rad(c.rx)), gy = Math.sin(rad(c.rx)), gl = Math.hypot(gx, gy);
+        const blurPx = (ST.dof_global ?? 1) * c.dof * 16 / S;
+        soft.style.filter = blurPx > 0.3 ? `blur(${blurPx}px)` : 'none';
+        if (gl < 0.02 || c.dof < 0.05) sharp.style.webkitMaskImage = 'none';
+        else {
+          const ux = gx / gl, uy = gy / gl, ang = Math.atan2(ux, -uy) * 180 / Math.PI;
+          const L = Math.abs(fw * ux) + Math.abs(fh * uy);
+          const tc = ((ox - fw/2) * ux + (oy - fh/2) * uy) / L + 0.5 + c.rack * (sh / L);
+          const band = clamp((H * 0.075) / (S * gl * L) / Math.max(0.35, c.dof), 0.004, 2);
+          const pc = v => (v * 100).toFixed(3) + '%';
+          sharp.style.webkitMaskImage = `linear-gradient(${ang}deg, transparent ${pc(tc - band*2.2)}, #000 ${pc(tc - band)}, #000 ${pc(tc + band)}, transparent ${pc(tc + band*2.2)})`;
+        }
+        c2.update(lt, p);
+      }
+      const sheenPos = 50 + c.ry * 1.6 + c.rx * 0.6;
+      sharp._sheen.style.backgroundPosition = `${sheenPos}% 0`;
+      if (soft) soft._sheen.style.backgroundPosition = `${sheenPos}% 0`;
+      c1.update(lt, p);
+    }};
+  },
+
+  /* Real UI fragments (cropped from a screenshot or photo) as floating cards in the project's style. */
+  pieces(s) {
+    const root = el('div', 'scene');
+    const world = el('div', '', 'position:absolute;inset:0;'); root.appendChild(world);
+    const [nw, nh] = s._nat; const dpr = s.dpr ?? 2;
+    const cap = buildCaption(root, s.caption, true);
+    const shiftX = cap && cap.side !== 'over' ? cap.xo * W * 0.9 : 0;
+    const items = (s.items || []).map((it, i) => {
+      let [cx, cy, cw, ch] = it.crop || [0, 0, 1, 1];
+      const ins = it.inset ?? 0.003;                          // trim a hair so crops don't catch neighbours
+      cx += ins; cy += ins * nw / nh; cw -= 2 * ins; ch -= 2 * ins * nw / nh;
+      const pw = cw * nw, ph = ch * nh;                       // native pixels of the crop
+      const base = (it.width ?? Math.min(0.42, (pw / dpr) * (H / 1080) * 1.35 / W)) * W;   // on-screen width
+      const sc = base / pw;
+      const r = (it.radius ?? ST.radius ?? 12) * dpr, bw = (ST.border_width ?? 0) * dpr;
+      const node = el('div', 'piece', `width:${pw}px;height:${ph}px;border-radius:${r}px;background-image:url("${s.screen}");
+        background-size:${nw}px ${nh}px;background-position:${-cx * nw}px ${-cy * nh}px;background-color:${C.surface};
+        box-shadow:${[cardShadow((H / 1080) / sc * 0.6), bw ? `inset 0 0 0 ${bw}px ${ST.border_color || C.border}` : ''].filter(x => x && x !== 'none').join(',') || 'none'};`);
+      world.appendChild(node);
+      const [ax, ay] = it.at || [0.5, 0.5];
+      return { node, pw, ph, sc, x: ax * W + shiftX, y: ay * H, rot: it.rotate ?? 0, z: it.z ?? (i % 3) * 0.5, from: it.from || (i % 2 ? 'below' : 'right') };
+    });
+    let times = null;
+    return { root, render(lt, d) {
+      if (cap) cap.render(lt, this.start, d);
+      times = times || beatTimes(this.start, items.length, s.at ?? 0.15, d * 0.5);
+      const drift = ease.sine(clamp(lt / d));
+      items.forEach((it, i) => {
+        const q = clamp((lt - times[i]) / MO.pDur), e = ease[MO.pEase](q);
+        const off = it.from === 'below' ? [0, 1] : it.from === 'above' ? [0, -1] : it.from === 'left' ? [-1, 0] : [1, 0];
+        const dist = H * 0.35;
+        const px = it.x + off[0] * dist * (1 - e) - (drift - 0.5) * W * 0.02 * (1 + it.z);
+        const py = it.y + off[1] * dist * (1 - e) - (drift - 0.5) * H * 0.03 * (1 + it.z);
+        const scale = it.sc * (MO.text === 'pop' ? lerp(0.7, 1, e) : lerp(0.96, 1, e)) * lerp(1, 1.03, drift);
+        it.node.style.transform = `translate(${px - it.pw / 2}px, ${py - it.ph / 2}px) scale(${scale}) rotate(${it.rot + (1 - e) * (MO.text === 'pop' ? 6 : 0)}deg)`;
+        it.node.style.opacity = clamp(q * 3);
+        it.node.style.filter = MO.blur && q < 1 ? `blur(${(1 - e) * MO.blur * 2}px)` : 'none';
+      });
+    }};
+  },
+
+  title(s) {
+    const root = el('div', 'scene');
+    const box = el('div', 'title', titleBoxCss()); root.appendChild(box);
+    let eyebrow = null;
+    if (s.eyebrow) { eyebrow = el('div', 'disp', `font-size:${2.8*U*FS}px;font-weight:${TY.sub_weight};color:${C.accent};margin-bottom:1.1em;letter-spacing:${TY.case === 'upper' ? '0.08em' : '0'};`); eyebrow.textContent = caseT(s.eyebrow); box.appendChild(eyebrow); }
+    const size = s.size === 'large' ? (PORTRAIT ? 13 : 17) : (PORTRAIT ? 8.5 : 10);
+    const { box: txt, lines } = makeLines(box, s.text, '', headCss(size) + (s.size === 'large' ? `letter-spacing:${TY.tracking - 0.015}em;` : ''));
+    let sub = null;
+    if (s.subtitle) { sub = el('div', '', subCss(3.6)); sub.textContent = s.subtitle; box.appendChild(sub); }
+    let times = null;
+    return { root, fit: [txt], render(lt, d) {
+      times = times || beatTimes(this.start, lines.length + 2, 0.1, d * 0.5);
+      if (eyebrow) fadeIn(eyebrow, lt, 0);
+      riseLines(lines, lt, eyebrow ? times.slice(1) : times);
+      txt.style.transform = MO.text === 'fade' ? '' : `scale(${lerp(1, 1.02, lt / d)})`;
+      if (sub) fadeIn(sub, lt, times[lines.length + (eyebrow ? 1 : 0)]);
+    }};
+  },
+
+  /* A short list that builds item by item: services, skills, features, steps. */
+  list(s) {
+    const root = el('div', 'scene');
+    const box = el('div', 'title', `align-items:flex-start;text-align:left;padding:0 ${W*(PORTRAIT ? 0.08 : 0.12)}px;`); root.appendChild(box);
+    let head = null;
+    if (s.title) { head = el('div', 'disp', `font-size:${3*U*FS}px;font-weight:${TY.sub_weight};color:${C.muted};margin-bottom:1.4em;letter-spacing:${TY.case === 'upper' ? '0.08em' : '0'};`); head.textContent = caseT(s.title); box.appendChild(head); }
+    const items = (s.items || []).slice(0, 6);
+    const size = items.length > 4 ? 6.4 : 7.6;
+    const rows = items.map((it, i) => {
+      const row = el('div', '', 'display:flex;align-items:baseline;gap:0.6em;');
+      if (s.numbered) { const n = el('span', 'disp', `font-size:${size*0.45*U*FS}px;color:${C.accent};font-weight:${TY.sub_weight};min-width:2.2em;`); n.textContent = String(i + 1).padStart(2, '0'); row.appendChild(n); }
+      const ln = makeLines(row, typeof it === 'string' ? it : it.text, '', headCss(size).replace(/max-width:[^;]+;/, '') + 'line-height:1.18;');
+      box.appendChild(row);
+      return { row, inner: ln.lines[0] };
+    });
+    let times = null;
+    return { root, render(lt, d) {
+      times = times || beatTimes(this.start, items.length + 1, 0.1, d * 0.55);
+      if (head) fadeIn(head, lt, 0, 1);
+      rows.forEach((r, i) => {
+        enter(r.inner, (lt - times[i + (head ? 1 : 0)]) / MO.tDur);
+        // earlier items settle back so the newest one leads
+        const newer = rows.length - 1 > i ? clamp((lt - times[i + 1 + (head ? 1 : 0)]) / 0.5) : 0;
+        r.row.style.opacity = lerp(1, s.dim_previous === false ? 1 : 0.38, newer);
+      });
+    }};
+  },
+
+  /* A real testimonial or quote from the project. Never invent one. */
+  quote(s) {
+    const root = el('div', 'scene');
+    const box = el('div', 'title', titleBoxCss()); root.appendChild(box);
+    const mark = el('div', 'disp', `font-size:${12*U*FS}px;line-height:.6;color:${C.accent};font-weight:${TY.weight};height:0.5em;`); mark.textContent = '“'; box.appendChild(mark);
+    const { lines } = makeLines(box, s.text, '', headCss(PORTRAIT ? 6 : 6.2) + 'line-height:1.2;');
+    const who = el('div', '', subCss(3)); who.innerHTML = `<b style="color:${C.text};font-weight:${TY.sub_weight}">${esc(s.author || '')}</b>${s.role ? ' &nbsp;·&nbsp; ' + esc(s.role) : ''}`; box.appendChild(who);
+    let times = null;
+    return { root, render(lt, d) {
+      times = times || beatTimes(this.start, lines.length + 2, 0.1, d * 0.5);
+      fadeIn(mark, lt, 0);
+      riseLines(lines, lt, times.slice(1));
+      fadeIn(who, lt, times[lines.length + 1]);
+    }};
+  },
+
+  end(s) {
+    const root = el('div', 'scene');
+    const box = el('div', 'title', `align-items:center;text-align:center;`); root.appendChild(box);
+    let mark;
+    if (s.logo) { mark = el('img', 'end-logo'); mark.src = s.logo; mark.style.height = (s.logo_height || 11) * U + 'px'; }
+    else { mark = el('div', 'disp', `font-size:${(PORTRAIT ? 11 : 14)*U*FS}px;font-weight:${TY.weight};letter-spacing:${TY.tracking - 0.01}em;line-height:1;`); mark.innerHTML = rich(caseT(s.name)); }
+    box.appendChild(mark);
+    let tag = null;
+    if (s.tagline) { tag = el('div', '', subCss(3.8)); tag.textContent = s.tagline; box.appendChild(tag); }
+    let cta = null;
+    if (s.cta) {
+      const asButton = (s.cta_style || ST.cta_style || 'button') === 'button';
+      cta = el('div', asButton ? 'btn' : '', asButton
+        ? `margin-top:${3.6*U}px;padding:${1.8*U}px ${3.8*U}px;font-size:${3.5*U*FS}px;font-weight:${TY.sub_weight};background:${C.accent};color:${C.on_accent};border-radius:${Math.min(4*U, (ST.button_radius ?? ST.radius ?? 10) * (H / 1080) * 1.6)}px;${ST.shadow === 'hard' ? `box-shadow:${cardShadow(H/1080)};border:${(ST.border_width||2)*H/1080}px solid ${ST.border_color || C.text};` : ''}`
+        : `margin-top:1.6em;font-size:${3.2*U*FS}px;font-weight:${TY.sub_weight};color:${C.text};`);
+      cta.textContent = caseT(s.cta); box.appendChild(cta);
+    }
+    let url = null;
+    if (s.url) { url = el('div', '', `position:absolute;bottom:${7*U}px;left:0;right:0;text-align:center;font-size:${2.6*U*FS}px;color:${C.muted};font-weight:${TY.sub_weight};`); url.textContent = s.url; root.appendChild(url); }
+    return { root, fit: s.logo ? [] : [mark], render(lt, d) {
+      enter(mark, lt / (MO.tDur * 1.6), MO.text === 'pop' ? 'pop' : 'fade');
+      if (MO.text !== 'pop') mark.style.transform += ` scale(${lerp(0.97, 1, ease.outCubic(clamp(lt / 1.4)))})`;
+      if (tag) fadeIn(tag, lt, 0.7 * MO.stagger);
+      if (cta) { const q = clamp((lt - 1.1 * MO.stagger) / MO.pDur), e = ease[MO.pEase](q); cta.style.opacity = clamp(q * 2); cta.style.transform = `translateY(${(1 - e) * 20}px) scale(${lerp(0.92, 1, e)})`; }
+      if (url) fadeIn(url, lt, 1.5 * MO.stagger, 1);
+    }};
+  },
+};
+
+/* ---------- background, in the project's own idiom ---------- */
+const bg = document.getElementById('bg'), bgfx = document.getElementById('bgfx');
+function renderBg(t, total) {
+  const a = t / total, kind = ST.background || 'solid';
+  if (kind === 'launch') {
+    const lx = 62 + 10 * Math.sin(a * Math.PI * 1.2), ly = 34 + 8 * Math.cos(a * Math.PI);
+    bg.style.background = `radial-gradient(120% 100% at ${lx}% ${ly}%, ${ST.launch.light} 0%, ${ST.launch.mid} 38%, ${ST.launch.deep} 88%)`;
+  } else if (kind === 'gradient') {
+    bg.style.background = `linear-gradient(${150 + 20 * Math.sin(a * Math.PI)}deg, ${C.bg} 0%, ${C.bg2 || C.surface} 100%)`;
+  } else if (kind === 'glow') {
+    const lx = 30 + 40 * Math.sin(a * Math.PI * 1.1), ly = 40 + 15 * Math.cos(a * Math.PI * 1.7);
+    bg.style.background = `radial-gradient(55% 60% at ${lx}% ${ly}%, ${hexA(C.accent, ST.theme === 'dark' ? .28 : .16)} 0%, ${hexA(C.accent, 0)} 70%), ${C.bg}`;
+  } else {
+    bg.style.background = C.bg;
+  }
+  if (kind === 'grid' || kind === 'dots') {
+    const g = 6 * U, off = (a * g * 2) % g;
+    bgfx.style.background = kind === 'grid'
+      ? `linear-gradient(${C.border} 1px, transparent 1px) 0 ${off}px / ${g}px ${g}px, linear-gradient(90deg, ${C.border} 1px, transparent 1px) ${off}px 0 / ${g}px ${g}px`
+      : `radial-gradient(${C.border} 1.2px, transparent 1.6px) ${off}px ${off}px / ${g * 0.5}px ${g * 0.5}px`;
+    bgfx.style.webkitMaskImage = 'radial-gradient(75% 75% at 50% 50%, #000 30%, transparent 100%)';
+    if (kind === 'grid' || kind === 'dots') bg.style.background = C.bg;
+  }
+}
+
+/* ---------- timeline & transitions ---------- */
+const TR = { cut: 0, blur: 0.35, whip: 0.2, dip: 0.28, slide: 0.25 };
+const svgNS = 'http://www.w3.org/2000/svg';
+const defs = document.createElementNS(svgNS, 'svg'); defs.setAttribute('width', 0); defs.setAttribute('height', 0);
+defs.style.position = 'absolute'; document.body.appendChild(defs);
+const scenes = []; let cursor = 0;
+SB.scenes.forEach((s, i) => {
+  const inst = builders[s.type](s);
+  inst.start = cursor; inst.dur = s.duration; cursor += s.duration;
+  inst.tin = i === 0 ? 'cut' : (s.transition || SB.default_transition || 'cut');
+  const f = document.createElementNS(svgNS, 'filter'); f.setAttribute('id', 'mb' + i);
+  f.setAttribute('x', '-20%'); f.setAttribute('width', '140%'); f.setAttribute('y', '-20%'); f.setAttribute('height', '140%');
+  const g = document.createElementNS(svgNS, 'feGaussianBlur'); g.setAttribute('stdDeviation', '0 0');
+  f.appendChild(g); defs.appendChild(f); inst.mb = g; inst.idx = i;
+  stage.appendChild(inst.root); scenes.push(inst);
+});
+scenes.forEach((sc, i) => { sc.tout = i < scenes.length - 1 ? scenes[i + 1].tin : 'cut'; });
+const TOTAL = cursor;
+
+window.renderAt = function (t) {
+  renderBg(t, TOTAL);
+  for (const sc of scenes) {
+    const s0 = sc.start, s1 = sc.start + sc.dur;
+    const ov = x => (x === 'blur' || x === 'whip' || x === 'slide') ? TR[x] : 0;
+    const pre = ov(sc.tin), post = ov(sc.tout);
+    const on = t >= s0 - pre && t < s1 + post;
+    sc.root.style.visibility = on ? 'visible' : 'hidden';
+    if (!on) continue;
+    let op = 1, blur = 0, tx = 0, ty = 0, mbx = 0, mby = 0;
+    if (sc.tin === 'blur') { const q = ease.sine(clamp((t - (s0 - pre)) / (2 * pre))); op = Math.min(op, q); blur = Math.max(blur, (1 - q) * 22); }
+    if (sc.tin === 'whip') { const q = clamp((t - (s0 - pre)) / (2 * pre)); tx += (1 - ease.outCubic(q)) * W * 0.45; mbx = Math.max(mbx, (1 - q) * 90); }
+    if (sc.tin === 'slide') { const q = clamp((t - (s0 - pre)) / (2 * pre)); ty += (1 - ease.outQuint(q)) * H; mby = Math.max(mby, (1 - q) * 40); }
+    if (sc.tin === 'dip') { const q = ease.sine(clamp((t - s0) / TR.dip)); op = Math.min(op, q); }
+    if (sc.tout === 'blur') { const q = ease.sine(clamp((t - (s1 - post)) / (2 * post))); op = Math.min(op, 1 - q); blur = Math.max(blur, q * 22); }
+    if (sc.tout === 'whip') { const q = clamp((t - (s1 - post)) / (2 * post)); tx -= ease.inCubic(q) * W * 0.45; mbx = Math.max(mbx, q * 90); }
+    if (sc.tout === 'slide') { const q = clamp((t - (s1 - post)) / (2 * post)); ty -= ease.inCubic(q) * H; mby = Math.max(mby, q * 40); }
+    if (sc.tout === 'dip') { const q = ease.sine(clamp((t - (s1 - TR.dip)) / TR.dip)); op = Math.min(op, 1 - q); }
+    sc.root.style.opacity = op;
+    sc.root.style.transform = (tx || ty) ? `translate(${tx}px, ${ty}px)` : '';
+    sc.mb.setAttribute('stdDeviation', `${mbx.toFixed(1)} ${mby.toFixed(1)}`);
+    const fl = [];
+    if (mbx > 0.5 || mby > 0.5) fl.push(`url(#mb${sc.idx})`);
+    if (blur > 0.3) fl.push(`blur(${blur}px)`);
+    sc.root.style.filter = fl.length ? fl.join(' ') : 'none';
+    sc.render(t - sc.start, sc.dur);
+  }
+  // fade up from / down to the project's background colour (not black)
+  stage.style.opacity = Math.min(ST.fade_in === false ? 1 : clamp(t / 0.35), 1 - clamp((t - (TOTAL - 0.45)) / 0.45));
+};
+
+function fitText() {
+  for (const sc of scenes) for (const node of sc.fit || []) {
+    sc.root.style.visibility = 'visible';
+    let fs = parseFloat(node.style.fontSize), g = 0;
+    while (node.scrollWidth > W * 0.86 && g++ < 200) { fs *= 0.96; node.style.fontSize = fs + 'px'; }
+    sc.root.style.visibility = 'hidden';
+  }
+}
+
+window.__ready = (async () => {
+  await document.fonts.ready;
+  const imgs = [...document.images];
+  await Promise.all(imgs.map(i => i.complete ? 0 : new Promise(r => { i.addEventListener('load', r); i.addEventListener('error', r); })));
+  imgs.forEach(i => { i._natH = i.naturalHeight * (parseFloat(i.style.width) || i.naturalWidth) / (i.naturalWidth || 1); });
+  fitText();
+  window.renderAt(0);
+  return TOTAL;
+})();
+</script>
+</body>
+</html>
