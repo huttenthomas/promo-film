@@ -9,6 +9,7 @@ Turn a project directory into a short, snappy film (default **15 s**; 20–30 s 
 like it was made by the project's own designer: the same colours, type, radii and feel as the site or app,
 telling a short story about what the viewer gets, cut fast to music.
 
+Every film follows one **direction** — its genre of motion — picked from what the project is (step 1b).
 You write two small JSON files — **style.json** (the look, extracted from the project) and
 **storyboard.json** (the story: scenes, captions, shots) — and run `scripts/render.py`. The renderer does
 the craft: edits a CC0 track to exactly `target_duration`, snaps cuts to the beat, lands each line of type on a beat,
@@ -74,6 +75,37 @@ If the source has almost no copy (a bare repo, a one-line README), say so, base 
 there is plus the visual personality, and keep captions plain and neutral rather than inventing a
 personality.
 
+## 1b. Pick one direction
+A direction is the film's genre: how things move, how fast, what the hero is. Pick exactly **one** per
+film — mixing them reads as a template sampler. If the user asked for a look ("like an app store
+trailer", "editorial", "show the notifications coming in"), that wins. Otherwise decide from the project:
+
+| direction | pick it when | the hero | how it moves |
+|---|---|---|---|
+| `showcase` | a **mobile app** with good phone screens | the device | light and airy; the phone rises and makes a full turn while the headline builds word by word, settles before a soft disc, close-ups on the screen, pairs of phones. Long ease-outs (~2.5 s of motion, then ~1 s of stillness). |
+| `choreography` | a product whose value lives in **one repeating UI element**: messages, notifications, tickets, tasks, search results, AI answers, transactions | that component | minimal backdrop; cards land one per beat and push up, their text types in, zoom-throughs between scenes, a hard punch-in on one detail. Calm and precise: ~0.7 s per entrance, 1–1.5 s holds. |
+| `editorial` | **image-led** work — portfolio, photographer, studio, fashion/food/interior brand — with **10+ strong images** | the images | magazine-like; images burst around a big title, endless image columns, a carousel that spells a sentence one word per image, cream ↔ black scene alternation. Fast: a cut every ~2 s, quick eased bursts over constant gliding. |
+| `classic` | everything else: libraries/CLIs, web apps without one hero component, text-led sites, too few images for editorial | screens and type | the default kit below (panels, pieces, camera moves, beat-cut type). |
+
+Tie-breaks: a web SaaS with an inbox/feed → `choreography`, not `showcase`. A portfolio with only 4–5
+projects → `classic` with `pieces` (editorial would look empty). A mobile app whose value is its feed →
+`showcase`, and use a `stack` scene once for the feed. In the brief, state the direction and the one
+reason for it ("showcase — it's an iOS/Android app and the screens are its best material").
+
+Set it as `"direction": "..."` in the storyboard; the renderer retunes timing and type reveal to it and
+the linter checks it has what it needs. Direction recipes (15 s):
+- **showcase** — hook title (1.6 s) → `spin` reveal with `backdrop: "disc"` and a caption (3 s) →
+  `wipe` to a `punch` close-up on the screen's best part (1.8 s) → `zoom` to a `turntable` of another
+  screen (2.4 s) → phone pair with `screen2` (2.2 s) → end card (4 s). Staging `phone`; light `solid` bg.
+- **choreography** — hook title (1.8 s) → `stack` of 4–5 of the product's real items (3.5–4 s) →
+  `zoom` to a `punch` on the one detail that matters (2 s) → panel shot with caption (2.4 s) → `zoom`
+  to end card (4.8 s). Staging `panel`, `gradient` or `solid` bg. Scenes may run 2–4 s here: the
+  stillness between entrances is the look.
+- **editorial** — `collage` with the name (2.2 s) → `loop` with services or a line, `invert` (2.6 s) →
+  `wipe` to a `carousel` whose words form one sentence (3.4 s) → `list` or proof, `invert` (2.8 s) →
+  end card with `cta_style: "text"` (4 s). Staging `none`, radius as the site, `snappy`.
+Full examples are in `references/storyboard.md`.
+
 ## 2. Capture the look (style.json)
 The film must look like the project, not like a template. Run the app or site (or serve its build folder)
 and extract its identity:
@@ -115,6 +147,10 @@ python <skill>/scripts/capture.py --url ... --device phone --click "text=Pricing
 - Capture states that *show* each point (filled data, results, open panels). Empty states make dead shots.
 - Portfolios: capture the work grid and individual case studies; project images/photos in the repo can be
   used directly as `screen` images (a headshot on the person's own site is fine — it's their material).
+- **Per direction**: showcase needs 2–3 phone captures at 3x of the strongest screens; choreography
+  needs the hero component with real content (log into the demo/seed data; note 4–6 real items' titles
+  and text for the `stack`); editorial needs the actual work images from the repo (`public/`, `assets/`,
+  case-study folders) — 10–14 of the best, varied in colour and framing.
 - **Pieces**: for cut-out shots, open the screenshot, overlay a grid if needed
   (`ffmpeg -i s.png -vf "scale=600:-1,drawgrid=w=60:h=60:c=red@0.5" g.png`) and note crops as
   `[x, y, w, h]` fractions — buttons, cards, tiles, portfolio thumbnails, a stat, a testimonial card.
@@ -127,7 +163,8 @@ transitions, the arcs per subject, and examples.
 ### Pacing — this matters more than length
 A film feels snappy because of how often it cuts and how little there is to read, not because it is short.
 - Set `"target_duration": 15` by default.
-- **Scenes 1.5–2 s**; only the end card holds longer (4–4.5 s). Never more than 2.5 s for a mid-film scene.
+- **Scenes 1.5–2 s**; only the end card holds longer (4–4.5 s). Never more than 2.5 s for a mid-film scene
+  — except the direction's signature scene: a `spin` (≤ 3 s), a `stack` (≤ 4 s), a `carousel` (≤ 3.5 s).
 - **Captions and titles 2–4 words.** A viewer must read it in one beat. Long lines force long scenes.
 - **One idea per cut.** Split a busy scene into two quick ones rather than holding one longer.
 - Transitions `cut` / `whip` / `slide` only. No `dip`/`blur` in the snappy cut.
@@ -135,7 +172,7 @@ A film feels snappy because of how often it cuts and how little there is to read
 - Long testimonials don't fit a 15 s cut; use a short stat as proof instead (e.g. a rating, a customer count).
   Never trim words out of the middle of a quote to make it fit — use it whole or not at all.
 
-Default 15 s arc (product/library): reveal with their own hero line (2 s) → stat or benefit (1.5 s) →
+Default 15 s arc for `classic` (product/library; other directions: see 1b): reveal with their own hero line (2 s) → stat or benefit (1.5 s) →
 benefit + visual (2 s) → benefit + visual (2 s) → proof stat (1.5 s) → payoff line (1.5 s) → cta (4.5 s).
 
 Longer arcs, for a 30 s version on request:
@@ -213,7 +250,7 @@ the site itself doesn't have.
 Flat stagings render in about a minute; 3D devices take ~0.7 s per frame per worker (`--workers`).
 
 ## 6. Deliver
-Send the MP4 with a short note: the brief, the voice in one line (language, address, register, and which
+Send the MP4 with a short note: the direction and why, the brief, the voice in one line (language, address, register, and which
 captions are the project's own words), the style decisions (motion, staging, which fonts/colours came
 from the project), and the CC0 track used (default: "Make Funk" by HoliznaCC0). Offer next steps: a
 vertical cut (`--format vertical`), a longer 30 s version with a customer quote, their own track, or a
@@ -222,6 +259,8 @@ slower motion personality.
 ## Boundaries
 - Only true claims and real quotes from the project. No invented testimonials, clients, numbers or ratings.
 - Use the person's own photos/work from their project only; don't pull images of people from the web.
-- No Apple trademarks or device lookalikes; the `phone` frame is generic.
+- No Apple trademarks or device lookalikes; the `phone` frame is generic. The same goes for operating
+  system UI: no fake lock screens, "9:41" status bars, island-style call banners or OS notification
+  styling. In `choreography`, the stacked cards are the project's own UI in the project's own style.
 - Bundled fonts (Inter, JetBrains Mono) are OFL; bundled music is CC0. Project fonts are used only for
   rendering the user's own film.

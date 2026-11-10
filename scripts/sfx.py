@@ -67,9 +67,9 @@ def design(scenes, length, reveal_index=None, level="full"):
     for i, sc in enumerate(scenes):
         if i == 0: continue
         tr = sc.get("transition", "cut")
-        if tr in ("blur", "whip", "dip", "slide"):
+        if tr in ("blur", "whip", "dip", "slide", "zoom", "wipe"):
             w = norm(whoosh(0.8 if tr == "whip" else 0.9, 0.7))
-            place(out, w, sc["start"] - 0.8 * 0.7, (0.16 if tr in ("whip", "slide") else 0.10) * g)
+            place(out, w, sc["start"] - 0.8 * 0.7, (0.16 if tr in ("whip", "slide", "wipe") else 0.10) * g)
     if level == "whoosh": return out
     if reveal_index is not None:
         r = scenes[reveal_index]["start"]

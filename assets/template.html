@@ -12,7 +12,10 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 .cam { position: absolute; inset: 0; transform-style: preserve-3d; }
 .dev { position: absolute; left: 0; top: 0; transform-origin: 0 0; transform-style: preserve-3d; }
 .layer { position: absolute; left: 0; top: 0; }
-.face { position: absolute; left: 0; top: 0; overflow: hidden; }
+.face { position: absolute; left: 0; top: 0; overflow: hidden; backface-visibility: hidden; }
+.w { display: inline-block; will-change: transform, opacity; }
+.card { position: absolute; left: 0; top: 0; box-sizing: border-box; overflow: hidden; }
+.tile { position: absolute; left: 0; top: 0; background-size: cover; background-position: center; overflow: hidden; }
 .screen { position: absolute; overflow: hidden; }
 .screen img { display: block; width: 100%; height: auto; }
 .light { position: absolute; inset: 0; pointer-events: none; }
@@ -52,7 +55,8 @@ const lerp = (a, b, p) => a + (b - a) * p;
 const backK = 1.70158 * 1.15;
 const ease = { sine: p => -(Math.cos(Math.PI * p) - 1) / 2, cubic: p => p < .5 ? 4*p*p*p : 1 - Math.pow(-2*p + 2, 3) / 2,
   outCubic: p => 1 - Math.pow(1 - p, 3), outExpo: p => p >= 1 ? 1 : 1 - Math.pow(2, -10 * p), linear: p => p,
-  outQuint: p => 1 - Math.pow(1 - p, 5), inCubic: p => p * p * p,
+  outQuint: p => 1 - Math.pow(1 - p, 5), inCubic: p => p * p * p, outQuart: p => 1 - Math.pow(1 - p, 4),
+  inOutQuart: p => p < .5 ? 8*p*p*p*p : 1 - Math.pow(-2*p + 2, 4) / 2,
   outBack: p => 1 + (backK + 1) * Math.pow(p - 1, 3) + backK * Math.pow(p - 1, 2) };
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 // *word* -> accent colour (the project's own highlight colour, never a gradient)
@@ -71,7 +75,20 @@ const MOTION = {
   playful:   { text: 'pop',  tDur: .55, tEase: 'outBack', pDur: .6, pEase: 'outBack', blur: 0, cam: 1.1, stagger: .8 },
   calm:      { text: 'fade', tDur: 1.1, tEase: 'outCubic', pDur: 1.3, pEase: 'outCubic', blur: 6, cam: .75, stagger: 1.4 },
 };
-const MO = MOTION[ST.motion] || MOTION.cinematic;
+/* ---------- directions ----------
+   A direction is the film's overall genre, picked from what the project is (see SKILL.md):
+   classic (default) · showcase (3D phone hero, mobile apps) · choreography (one UI component
+   performs: cards stack, text types, zoom-throughs) · editorial (image-led collage, loops, carousels).
+   It retunes timing on top of the motion personality and sets how type is revealed. */
+const DIR = SB.direction || 'classic';
+const DIR_MO = {
+  showcase:     { tDur: .8,  tEase: 'outExpo',  pDur: 1.0, pEase: 'outExpo',  blur: 0, cam: 1.0 },
+  choreography: { tDur: .6,  tEase: 'outQuint', pDur: .75, pEase: 'outQuint', blur: 0, cam: .9 },
+  editorial:    { tDur: .45, tEase: 'outQuint', pDur: .55, pEase: 'outExpo',  blur: 0, cam: 1.25 },
+};
+const MO = Object.assign({}, MOTION[ST.motion] || MOTION.cinematic, DIR_MO[DIR] || {});
+// how headlines appear: 'lines' (each line rises) or 'words' (word by word, pale ink darkening to full)
+const REVEAL = ST.reveal || ((DIR === 'showcase' || DIR === 'choreography') ? 'words' : 'lines');
 
 /* ---------- beat grid + kinetic type ---------- */
 const BEATS = SB.beats || [];
@@ -87,7 +104,18 @@ function beatTimes(sceneStart, n, from = 0.12, within = null) {
 function makeLines(parent, text, cls, css, display = true) {
   const box = el('div', (display ? 'disp ' : '') + cls, css); parent.appendChild(box);
   const lines = String(text).split('\n').map(t => {
-    const ln = el('span', 'line'); const inner = el('span'); inner.innerHTML = rich(caseT(t)); ln.appendChild(inner); box.appendChild(ln);
+    const ln = el('span', 'line'); const inner = el('span'); ln.appendChild(inner); box.appendChild(ln);
+    if (REVEAL === 'words') {
+      // keep *emphasis* across words: track whether we are inside a highlighted run
+      let open = false; inner._words = [];
+      String(caseT(t)).split(' ').filter(x => x.length).forEach((tok, k) => {
+        const starts = tok.startsWith('*'), ends = tok.endsWith('*') && (tok.length > 1 || !starts);
+        const hl = open || starts; const bare = tok.replace(/\*/g, '');
+        if (starts && !ends) open = true; if (ends && !starts) open = false;
+        if (k) inner.appendChild(document.createTextNode(' '));
+        const w = el('span', 'w' + (hl ? ' acc' : '')); w.textContent = bare; inner.appendChild(w); inner._words.push(w);
+      });
+    } else inner.innerHTML = rich(caseT(t));
     return inner;
   });
   return { box, lines };
@@ -100,8 +128,20 @@ function enter(node, p, kind = MO.text, dist = 110) {
   else { node.style.transform = `translateY(${(1 - e) * 14}px)`; node.style.opacity = e; }
   if (MO.blur) node.style.filter = p < 1 ? `blur(${(1 - e) * MO.blur}px)` : 'none';
 }
+function enterWords(inner, lt, at) {
+  // word by word: each word rises a little and arrives pale, then darkens to full ink (showcase look)
+  const gap = 0.085 * (MO.stagger > 1 ? 1.3 : 1);
+  inner._words.forEach((w, k) => {
+    const q = clamp((lt - at - k * gap) / MO.tDur), e = ease[MO.tEase](q);
+    w.style.transform = `translateY(${(1 - e) * 45}%)`;
+    w.style.opacity = q <= 0 ? 0 : (q < 0.25 ? q / 0.25 * 0.28 : lerp(0.28, 1, ease.outCubic((q - 0.25) / 0.75)));
+  });
+}
 function riseLines(lines, lt, times) {
-  lines.forEach((ln, i) => enter(ln, (lt - times[Math.min(i, times.length - 1)]) / MO.tDur));
+  lines.forEach((ln, i) => {
+    const at = times[Math.min(i, times.length - 1)];
+    if (ln._words) enterWords(ln, lt, at); else enter(ln, (lt - at) / MO.tDur);
+  });
 }
 function fadeIn(node, lt, at, maxOp = 1) {
   const q = ease.outCubic(clamp((lt - at) / (MO.tDur * 1.1)));
@@ -126,6 +166,10 @@ const MOVES = {
   'pull-back':   { ease: 'cubic', from: { m: 2.6, rx: 30, ry: -22, rz: 7, dof: 1 }, to: { m: 0.93, rx: 7, ry: -13, rz: 0, fx: .5, fy: .5, y: .01, dof: .15 } },
   'float':       { ease: 'sine', from: { m: 0.94, rx: 7, ry: -17, rz: -1.5, fx: .5, fy: .5, y: .02, dof: .12 }, to: { m: 1.0, rx: 4, ry: 9, rz: 1, fx: .5, fy: .5, y: 0, dof: .12 } },
   'hero-turn':   { ease: 'outQuint', from: { m: 0.86, rx: 12, ry: 62, rz: 0, fx: .5, fy: .5, x: .12, dof: .25 }, to: { m: 1.0, rx: 4, ry: -9, rz: 0, fx: .5, fy: .5, x: 0, dof: .12 } },
+  // showcase: the device rises from below while making a full turn, then settles facing camera
+  'spin':        { ease: 'outQuart', from: { m: 0.78, rx: 20, ry: -372, rz: -10, fx: .5, fy: .5, y: .72, dof: 0 }, to: { m: 1.0, rx: 3, ry: -10, rz: 0, fx: .5, fy: .5, y: 0, dof: 0 } },
+  // showcase: slow turntable for a held hero shot
+  'turntable':   { ease: 'sine', from: { m: 0.97, rx: 4, ry: -24, rz: 0, fx: .5, fy: .5 }, to: { m: 1.0, rx: 3, ry: 16, rz: 0, fx: .5, fy: .5 } },
   'tilt':        { ease: 'sine', from: { m: 0.96, rx: 12, ry: -14, rz: 0, fx: .5, fy: .5 }, to: { m: 1.0, rx: 6, ry: 10, rz: 0, fx: .5, fy: .5 } },
   // flat moves (any staging; the only ones used for full-bleed)
   'push-in':     { ease: 'cubic', from: { m: 1.0, rx: 6, ry: -10, rz: 0, fx: .5, fy: .5, dof: .1 }, to: { m: 1.9, rx: 18, ry: -16, rz: 3, dof: .8 } },
@@ -134,6 +178,8 @@ const MOVES = {
   'zoom-out':    { ease: 'cubic', from: { m: 2.1 }, to: { m: 1.0, fx: .5, fy: .5 } },
   'pan-down':    { ease: 'sine', from: { m: 1.6, dfy: -0.18 }, to: { m: 1.6, dfy: 0.18 } },
   'pan-across':  { ease: 'sine', from: { m: 1.7, dfx: -0.2 }, to: { m: 1.7, dfx: 0.2 } },
+  // choreography: a hard-cut close-up on one element (set focus), barely drifting
+  'punch':       { ease: 'sine', from: { m: 2.6, dfy: 0.01 }, to: { m: 2.75, dfy: -0.01 } },
   'rise':        { ease: 'outBackish', from: { m: 0.94, y: 0.55, fx: .5, fy: .5 }, to: { m: 1.0, y: 0, fx: .5, fy: .5 } },
 };
 ease.outBackish = p => MO.pEase === 'outBack' ? ease.outBack(clamp(p * 1.8)) : ease.outExpo(clamp(p * 1.6));
@@ -332,8 +378,23 @@ function buildCaption(root, cap, wide) {
 const builders = {
   shot(s) {
     const root = el('div', 'scene');
+    let disc = null;
+    if (s.backdrop === 'disc') {   // a soft disc behind the device (showcase look), in the project's colours
+      disc = el('div', '', `position:absolute;left:0;top:0;width:${H*0.66}px;height:${H*0.66}px;border-radius:50%;
+        background:radial-gradient(circle at 50% 45%, ${hexA(C.accent, ST.theme === 'dark' ? .22 : .10)} 0%, ${hexA(C.accent, ST.theme === 'dark' ? .12 : .06)} 62%, ${hexA(C.accent, 0)} 100%), ${C.surface};`);
+      root.appendChild(disc);
+    }
     const cam = el('div', 'cam', `perspective:${W * 1.5}px;perspective-origin:50% 50%;`); root.appendChild(cam);
     const { kind, sw, sh } = frameSize(s);
+    let dev2 = null, f2 = null;
+    if (s.screen2) {   // a second screen of the same app, standing just behind the first
+      dev2 = el('div', 'dev'); cam.appendChild(dev2);
+      const k2 = { ...s, screen: s.screen2, _nat: s._nat2 || s._nat, scroll: null };
+      const fs2 = frameSize(k2);
+      f2 = buildFace({ kind }, fs2.sw, fs2.sh, screenContent(k2, fs2.sw, fs2.sh).node, s.dpr ?? 3);
+      if (kind === 'phone') buildWall(dev2, f2._w, f2._h, f2._r, f2._w * 0.085);
+      dev2.appendChild(f2);
+    }
     const dpr = s.dpr ?? (kind === 'phone' ? 3 : 2);
     const spec = { kind, url: s.url, title: s.title };
     const dev = el('div', 'dev'); cam.appendChild(dev);
@@ -378,6 +439,18 @@ const builders = {
         ox = lerp(fxp, fw / 2, wFit); oy = lerp(fyp, fh / 2, wFit);
       }
       dev.style.transform = `translate3d(${W/2 + (c.x + xo)*W}px, ${H/2 + c.y*H}px, 0) rotateZ(${c.rz}deg) rotateX(${c.rx}deg) rotateY(${c.ry}deg) scale3d(${S},${S},${S}) translate(${-ox}px, ${-oy}px)`;
+      if (disc) {
+        const q = ease.outExpo(clamp((lt - (s.backdrop_at ?? 0.25)) / 0.9));
+        const ds = lerp(0.5, 1, q) * (1 + 0.04 * ease.sine(clamp(p)));
+        disc.style.transform = `translate(${W/2 + xo*W - H*0.33 + (s.screen2 ? W*0.04 : 0)}px, ${H/2 - H*0.33}px) scale(${ds})`;
+        disc.style.opacity = q;
+      }
+      if (dev2) {
+        const q = clamp((lt - (s.screen2_at ?? 0.35)) / MO.pDur), e = ease[MO.pEase](q);
+        const S2 = fitScale * shrink * Math.min(c.m, 1.2) * 0.9;
+        dev2.style.transform = `translate3d(${W/2 + (xo + 0.105 + (1 - e) * 0.3)*W}px, ${H/2 + 0.045*H}px, ${-W*0.08}px) rotateY(${c.ry * 0.6 - 8}deg) rotateX(${c.rx * 0.6}deg) scale3d(${S2},${S2},${S2}) translate(${-f2._w/2}px, ${-f2._h/2}px)`;
+        dev2.style.opacity = clamp(q * 3);
+      }
       if (soft) {
         const gx = -Math.sin(rad(c.ry)) * Math.cos(rad(c.rx)), gy = Math.sin(rad(c.rx)), gl = Math.hypot(gx, gy);
         const blurPx = (ST.dof_global ?? 1) * c.dof * 16 / S;
@@ -441,6 +514,197 @@ const builders = {
     }};
   },
 
+  /* choreography: one UI component performs. Cards (the project's own notifications, messages,
+     results, rows) land one per beat at the bottom of a stack, push the earlier ones up, and their
+     text types itself in. Items: {title, text, meta, icon} drawn in the project's style, or
+     {crop: [x,y,w,h]} cut from `screen` like pieces. */
+  stack(s) {
+    const root = el('div', 'scene');
+    const cap = buildCaption(root, s.caption, true);
+    const shiftX = cap && cap.side !== 'over' ? cap.xo * W * 0.9 : 0;
+    const cw = (s.width ?? (PORTRAIT ? 0.86 : 0.46)) * W, sk = H / 1080;
+    const rad0 = Math.max(10 * sk, (ST.radius ?? 12) * sk * 1.6), gap = (s.gap ?? 1.4) * U;
+    const fs = (s.font ?? (PORTRAIT ? 3.0 : 2.7)) * U * FS;
+    const bw = (ST.border_width ?? 0) * sk;
+    const items = (s.items || []).map((it, i) => {
+      const card = el('div', 'card', `width:${cw}px;border-radius:${rad0}px;background:${C.surface};
+        box-shadow:${[cardShadow(sk * 0.55), bw ? `inset 0 0 0 ${bw}px ${ST.border_color || C.border}` : ''].filter(x => x && x !== 'none').join(',') || 'none'};`);
+      const o = { card, typed: null, full: '' };
+      if (it.crop) {
+        const [nw, nh] = s._nat; const [cx, cy, cwf, chf] = it.crop;
+        const hgt = cw * (chf * nh) / (cwf * nw);
+        card.style.height = hgt + 'px';
+        card.style.backgroundImage = `url("${s.screen}")`;
+        card.style.backgroundSize = `${cw / cwf}px ${(cw / cwf) * nh / nw}px`;
+        card.style.backgroundPosition = `${-cx * cw / cwf}px ${-cy * (cw / cwf) * nh / nw}px`;
+      } else {
+        card.style.padding = `${fs * 0.95}px ${fs * 1.1}px`;
+        card.style.fontSize = fs + 'px';
+        const row = el('div', '', `display:flex;align-items:center;gap:${fs * 0.6}px;`);
+        if (it.icon) { const im = el('img', '', `width:${fs * 2}px;height:${fs * 2}px;border-radius:${fs * 0.5}px;object-fit:cover;flex:none;`); im.src = it.icon; row.appendChild(im); }
+        else if (s.icons !== false) { const dot = el('div', 'disp', `width:${fs * 2}px;height:${fs * 2}px;border-radius:${Math.min(fs, (ST.radius ?? 12) * sk)}px;background:${C.accent};color:${C.on_accent || C.bg};display:flex;align-items:center;justify-content:center;font-weight:${TY.weight};flex:none;`); dot.textContent = (it.title || '·').trim()[0]; row.appendChild(dot); }
+        const col = el('div', '', 'flex:1;min-width:0;');
+        const top = el('div', '', 'display:flex;justify-content:space-between;align-items:baseline;gap:1em;');
+        const tt = el('div', 'disp', `font-weight:${TY.sub_weight};color:${C.text};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;`); tt.textContent = it.title || ''; top.appendChild(tt);
+        if (it.meta) { const mt = el('div', '', `color:${C.muted};font-size:.8em;white-space:nowrap;`); mt.textContent = it.meta; top.appendChild(mt); }
+        col.appendChild(top);
+        if (it.text) {
+          const body = el('div', '', `color:${C.muted};margin-top:.25em;line-height:1.3;position:relative;`);
+          const ghost = el('div', '', 'visibility:hidden;'); ghost.textContent = it.text; body.appendChild(ghost);   // reserves the final height
+          const live = el('div', '', 'position:absolute;inset:0;'); body.appendChild(live);
+          col.appendChild(body); o.typed = live; o.full = it.text;
+        }
+        row.appendChild(col); card.appendChild(row);
+      }
+      root.appendChild(card);
+      return o;
+    });
+    const maxH = (s.max_height ?? (PORTRAIT ? 0.6 : 0.72)) * H;
+    let times = null, hs = null;
+    return { root, render(lt, d) {
+      if (cap) cap.render(lt, this.start, d);
+      times = times || beatTimes(this.start, items.length, s.at ?? 0.12, d * 0.6);
+      hs = hs || items.map(o => o.card.offsetHeight);
+      const es = items.map((o, i) => ease[MO.pEase](clamp((lt - times[i]) / MO.pDur)));
+      // the stack stays centred as it grows (each new card pushes the others up by half its height);
+      // once it outgrows maxH the oldest cards scroll out of the top
+      let content = 0; es.forEach((e, i) => content += e * (hs[i] + (i ? gap : 0)));
+      const top0 = H / 2 - Math.min(content, maxH) / 2;
+      const scroll = Math.max(0, content - maxH);
+      let y = top0 - scroll;
+      items.forEach((o, i) => {
+        const e = es[i], q = clamp((lt - times[i]) / MO.pDur);
+        const yy = y + (1 - e) * hs[i] * 0.6;
+        const fadeTop = clamp((yy - (top0 - hs[i] * 0.9)) / (hs[i] * 0.9));
+        o.card.style.transform = `translate(${W / 2 + shiftX - cw / 2}px, ${yy}px) scale(${lerp(0.94, 1, e)})`;
+        o.card.style.opacity = clamp(q * 2.5) * fadeTop;
+        if (o.typed) {
+          const tStart = times[i] + MO.pDur * 0.35, cps = Math.max(28, o.full.length / 0.75);
+          const n = Math.floor(clamp((lt - tStart) * cps / o.full.length) * o.full.length);
+          if (o.typed._n !== n) { o.typed.textContent = o.full.slice(0, n); o.typed._n = n; }
+        }
+        y += e * (hs[i] + gap);
+      });
+    }};
+  },
+
+  /* editorial: columns of images scrolling endlessly (alternate directions), optional big title over them. */
+  loop(s) {
+    const root = el('div', 'scene');
+    const imgs = s.images || [], n = Math.max(1, s.columns ?? (PORTRAIT ? 2 : 4));
+    const cap = buildCaption(root, s.caption, true);
+    const area = cap && cap.side !== 'over' ? [W * 0.42, W * 0.96] : [W * 0.04, W * 0.96];
+    const g = (s.gap ?? 1.2) * U, colW = ((area[1] - area[0]) - g * (n - 1)) / n;
+    const tileH = colW * (s.ratio ?? 1.25);
+    const r = Math.min(colW * 0.08, (ST.radius ?? 0) * (H / 1080) * 1.4);
+    const cols = [];
+    for (let c = 0; c < n; c++) {
+      const col = el('div', '', 'position:absolute;left:0;top:0;'); root.insertBefore(col, root.firstChild);
+      const per = Math.max(3, Math.ceil(H / (tileH + g)) + 1), tiles = [];
+      for (let k = 0; k < per * 2; k++) {
+        const src = imgs[(c * 3 + (k % per)) % imgs.length];
+        const t = el('div', 'tile', `width:${colW}px;height:${tileH}px;border-radius:${r}px;background-image:url("${src}");background-color:${C.surface};`);
+        col.appendChild(t); tiles.push(t);
+      }
+      cols.push({ col, tiles, per, x: area[0] + c * (colW + g), dir: c % 2 ? 1 : -1, phase: (c * 0.37) % 1 });
+    }
+    let title = null;
+    if (s.title) {
+      const box = el('div', 'title', `align-items:center;text-align:center;z-index:2;`);
+      title = makeLines(box, s.title, '', headCss(s.size === 'large' ? 15 : 10) + `color:${s.title_color || C.bg};text-shadow:0 ${0.4*U}px ${3*U}px rgba(0,0,0,.35);`);
+      root.appendChild(box);
+    }
+    const speed = (s.speed ?? 0.16) * H;   // px per second
+    let times = null;
+    return { root, fit: title ? [title.box] : [], render(lt, d) {
+      if (cap) cap.render(lt, this.start, d);
+      const span = cols[0].per * (tileH + g);
+      cols.forEach((c, i) => {
+        const inQ = ease.outExpo(clamp((lt - i * 0.07) / 0.8));
+        let off = ((c.phase * span + lt * speed * c.dir) % span + span) % span;
+        c.col.style.transform = `translate(${c.x}px, ${-off + (1 - inQ) * H * c.dir * -0.6}px)`;
+        c.col.style.opacity = clamp(inQ * 2);
+        c.tiles.forEach((t, k) => { t.style.transform = `translateY(${k * (tileH + g) - (c.dir > 0 ? 0 : 0)}px)`; });
+      });
+      if (title) { times = times || beatTimes(this.start, title.lines.length, 0.3, d * 0.5); riseLines(title.lines, lt, times); }
+    }};
+  },
+
+  /* editorial: a strip of images gliding sideways, one word per image; the image crossing the centre
+     grows a little and its word lights up, so the words read as a sentence. */
+  carousel(s) {
+    const root = el('div', 'scene');
+    const items = s.items || [];
+    const ch = (s.height ?? (PORTRAIT ? 0.42 : 0.64)) * H, cw = ch / (s.ratio ?? 1.3), g = (s.gap ?? 3) * U;
+    const r = Math.min(cw * 0.06, (ST.radius ?? 0) * (H / 1080) * 1.4);
+    const cards = items.map(it => {
+      const box = el('div', '', `position:absolute;left:0;top:0;width:${cw}px;`);
+      const t = el('div', 'tile', `position:relative;width:${cw}px;height:${ch}px;border-radius:${r}px;background-image:url("${it.image}");background-color:${C.surface};`);
+      box.appendChild(t);
+      const wd = el('div', 'disp', s.label === 'over'
+        ? `position:absolute;left:${cw*0.08}px;bottom:${ch*0.06}px;font-size:${6*U*FS}px;font-weight:${TY.weight};letter-spacing:${TY.tracking}em;color:#fff;text-shadow:0 2px 18px rgba(0,0,0,.35);`
+        : `margin-top:${1.4*U}px;font-size:${5.2*U*FS}px;font-weight:${TY.weight};letter-spacing:${TY.tracking}em;`);
+      wd.innerHTML = rich(caseT(it.word || '')); box.appendChild(wd);
+      root.appendChild(box);
+      return { box, wd };
+    });
+    const step = cw + g, len = items.length * step;
+    return { root, render(lt, d) {
+      // travel so the first card starts just right of centre and the last one reaches centre by the end
+      const p = clamp(lt / d), x0 = W / 2 + step * 0.5, x1 = W / 2 - len + step * 0.5;
+      const head = lerp(x0, x1, ease[s.ease || 'linear'](p));
+      const inQ = ease.outExpo(clamp(lt / 0.6));
+      cards.forEach((c, i) => {
+        const cx = head + i * step + cw / 2;
+        const near = clamp(1 - Math.abs(cx - W / 2) / (step * 1.1));
+        const sc = lerp(1, s.focus_scale ?? 1.06, ease.sine(near));
+        c.box.style.transform = `translate(${cx - cw / 2}px, ${H / 2 - ch / 2 - (s.label === 'over' ? 0 : 4*U) + (1 - inQ) * H * 0.2}px) scale(${sc})`;
+        c.box.style.opacity = clamp(inQ * 2);
+        c.wd.style.opacity = lerp(0.3, 1, near);
+      });
+    }};
+  },
+
+  /* editorial: a burst of images flying out from behind a big title, landing in a loose scatter,
+     then drifting apart with depth. */
+  collage(s) {
+    const root = el('div', 'scene');
+    const imgs = (s.images || []).slice(0, 10);
+    // scatter slots around a central title (x, y, width as fractions); deterministic
+    const SLOTS = PORTRAIT
+      ? [[.25,.17,.3],[.74,.15,.26],[.14,.33,.2],[.86,.34,.2],[.28,.72,.28],[.74,.74,.3],[.5,.07,.2],[.52,.9,.24],[.1,.88,.18],[.9,.9,.18]]
+      : [[.17,.24,.15],[.8,.22,.13],[.09,.62,.12],[.9,.62,.13],[.3,.84,.13],[.68,.84,.14],[.5,.13,.1],[.35,.15,.08],[.64,.14,.07],[.5,.9,.08]];
+    // the band around the title (x .28-.72, y .36-.64) stays clear so the headline always reads
+    const tiles = imgs.map((src, i) => {
+      const [x, y, w] = (s.slots && s.slots[i]) || SLOTS[i % SLOTS.length];
+      const nat = (s._imgnat && s._imgnat[i]) || [4, 5];
+      const tw = w * W, th = Math.min(tw * nat[1] / nat[0], H * 0.42);
+      const t = el('div', 'tile', `width:${tw}px;height:${th}px;border-radius:${Math.min(tw*0.05, (ST.radius ?? 0) * (H/1080) * 1.4)}px;background-image:url("${src}");background-color:${C.surface};box-shadow:${cardShadow(H/1080*0.5)};`);
+      root.appendChild(t);
+      return { t, x: x * W, y: y * H, tw, th, z: ((i * 7) % 5) / 4, rot: s.rotate === false ? 0 : (((i * 37) % 9) - 4) * 0.9 };
+    });
+    let title = null;
+    if (s.title) {
+      const box = el('div', 'title', `align-items:center;text-align:center;z-index:2;`);
+      title = makeLines(box, s.title, '', headCss(s.size === 'large' ? 15 : 11) + (s.title_color ? `color:${s.title_color};` : ''));
+      root.appendChild(box);
+    }
+    let times = null, ttimes = null;
+    return { root, fit: title ? [title.box] : [], render(lt, d) {
+      // fast burst: images leave the centre in quick succession (not one per beat)
+      times = times || tiles.map((_, i) => (s.at ?? 0.1) + i * (s.stagger ?? 0.07));
+      const drift = ease.sine(clamp(lt / d));
+      tiles.forEach((o, i) => {
+        const q = clamp((lt - times[i]) / (MO.pDur * 1.15)), e = ease.outExpo(q);
+        const spread = 1 + drift * 0.06 * (0.5 + o.z);
+        const px = W / 2 + (o.x - W / 2) * e * spread, py = H / 2 + (o.y - H / 2) * e * spread;
+        o.t.style.transform = `translate(${px - o.tw / 2}px, ${py - o.th / 2}px) scale(${lerp(0.25, 1, e) * (1 + drift * 0.05 * o.z)}) rotate(${o.rot * e}deg)`;
+        o.t.style.opacity = clamp(q * 4);
+      });
+      if (title) { ttimes = ttimes || beatTimes(this.start, title.lines.length, 0.15, d * 0.4); riseLines(title.lines, lt, ttimes); }
+    }};
+  },
+
   title(s) {
     const root = el('div', 'scene');
     const box = el('div', 'title', titleBoxCss()); root.appendChild(box);
@@ -480,7 +744,8 @@ const builders = {
       times = times || beatTimes(this.start, items.length + 1, 0.1, d * 0.55);
       if (head) fadeIn(head, lt, 0, 1);
       rows.forEach((r, i) => {
-        enter(r.inner, (lt - times[i + (head ? 1 : 0)]) / MO.tDur);
+        const at = times[i + (head ? 1 : 0)];
+        if (r.inner._words) enterWords(r.inner, lt, at); else enter(r.inner, (lt - at) / MO.tDur);
         // earlier items settle back so the newest one leads
         const newer = rows.length - 1 > i ? clamp((lt - times[i + 1 + (head ? 1 : 0)]) / 0.5) : 0;
         r.row.style.opacity = lerp(1, s.dim_previous === false ? 1 : 0.38, newer);
@@ -559,7 +824,7 @@ function renderBg(t, total) {
 }
 
 /* ---------- timeline & transitions ---------- */
-const TR = { cut: 0, blur: 0.35, whip: 0.2, dip: 0.28, slide: 0.25 };
+const TR = { cut: 0, blur: 0.35, whip: 0.2, dip: 0.28, slide: 0.25, zoom: 0.3, wipe: 0.3 };
 const svgNS = 'http://www.w3.org/2000/svg';
 const defs = document.createElementNS(svgNS, 'svg'); defs.setAttribute('width', 0); defs.setAttribute('height', 0);
 defs.style.position = 'absolute'; document.body.appendChild(defs);
@@ -568,6 +833,11 @@ SB.scenes.forEach((s, i) => {
   const inst = builders[s.type](s);
   inst.start = cursor; inst.dur = s.duration; cursor += s.duration;
   inst.tin = i === 0 ? 'cut' : (s.transition || SB.default_transition || 'cut');
+  // scene colour: 'invert' swaps background and ink (editorial cream/black alternation); a wiped-in scene
+  // needs its own opaque background so it covers the scene underneath
+  if (s.invert) { inst.root.style.background = C.text; inst.root.style.color = C.bg; }
+  else if (s.bg) inst.root.style.background = s.bg;
+  else if (inst.tin === 'wipe' || s.opaque) inst.root.style.background = C.bg;
   const f = document.createElementNS(svgNS, 'filter'); f.setAttribute('id', 'mb' + i);
   f.setAttribute('x', '-20%'); f.setAttribute('width', '140%'); f.setAttribute('y', '-20%'); f.setAttribute('height', '140%');
   const g = document.createElementNS(svgNS, 'feGaussianBlur'); g.setAttribute('stdDeviation', '0 0');
@@ -581,7 +851,7 @@ window.renderAt = function (t) {
   renderBg(t, TOTAL);
   for (const sc of scenes) {
     const s0 = sc.start, s1 = sc.start + sc.dur;
-    const ov = x => (x === 'blur' || x === 'whip' || x === 'slide') ? TR[x] : 0;
+    const ov = x => (x === 'blur' || x === 'whip' || x === 'slide' || x === 'zoom' || x === 'wipe') ? TR[x] : 0;
     const pre = ov(sc.tin), post = ov(sc.tout);
     const on = t >= s0 - pre && t < s1 + post;
     sc.root.style.visibility = on ? 'visible' : 'hidden';
@@ -591,12 +861,19 @@ window.renderAt = function (t) {
     if (sc.tin === 'whip') { const q = clamp((t - (s0 - pre)) / (2 * pre)); tx += (1 - ease.outCubic(q)) * W * 0.45; mbx = Math.max(mbx, (1 - q) * 90); }
     if (sc.tin === 'slide') { const q = clamp((t - (s0 - pre)) / (2 * pre)); ty += (1 - ease.outQuint(q)) * H; mby = Math.max(mby, (1 - q) * 40); }
     if (sc.tin === 'dip') { const q = ease.sine(clamp((t - s0) / TR.dip)); op = Math.min(op, q); }
+    let sc2 = 1;
+    // zoom-through: the old scene rushes toward camera and defocuses while the new one settles in
+    if (sc.tin === 'zoom') { const q = clamp((t - (s0 - pre)) / (2 * pre)), e = ease.outQuint(q); sc2 *= lerp(0.84, 1, e); op = Math.min(op, ease.outCubic(clamp(q * 1.6))); blur = Math.max(blur, (1 - e) * 18); }
+    if (sc.tout === 'zoom') { const q = clamp((t - (s1 - post)) / (2 * post)), e = ease.inCubic(q); sc2 *= lerp(1, 1.45, e); op = Math.min(op, 1 - ease.sine(q)); blur = Math.max(blur, e * 20); }
+    // wipe: the new scene slides in from the left with a hard edge and covers the old one
+    if (sc.tin === 'wipe') { const q = clamp((t - (s0 - pre)) / (2 * pre)); tx += -(1 - ease.outQuint(q)) * W; }
+    if (sc.tout === 'wipe') { const q = clamp((t - (s1 - post)) / (2 * post)); tx += ease.outQuint(q) * W * 0.18; }
     if (sc.tout === 'blur') { const q = ease.sine(clamp((t - (s1 - post)) / (2 * post))); op = Math.min(op, 1 - q); blur = Math.max(blur, q * 22); }
     if (sc.tout === 'whip') { const q = clamp((t - (s1 - post)) / (2 * post)); tx -= ease.inCubic(q) * W * 0.45; mbx = Math.max(mbx, q * 90); }
     if (sc.tout === 'slide') { const q = clamp((t - (s1 - post)) / (2 * post)); ty -= ease.inCubic(q) * H; mby = Math.max(mby, q * 40); }
     if (sc.tout === 'dip') { const q = ease.sine(clamp((t - (s1 - TR.dip)) / TR.dip)); op = Math.min(op, 1 - q); }
     sc.root.style.opacity = op;
-    sc.root.style.transform = (tx || ty) ? `translate(${tx}px, ${ty}px)` : '';
+    sc.root.style.transform = (tx || ty || sc2 !== 1) ? `translate(${tx}px, ${ty}px) scale(${sc2})` : '';
     sc.mb.setAttribute('stdDeviation', `${mbx.toFixed(1)} ${mby.toFixed(1)}`);
     const fl = [];
     if (mbx > 0.5 || mby > 0.5) fl.push(`url(#mb${sc.idx})`);

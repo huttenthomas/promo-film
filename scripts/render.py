@@ -19,12 +19,15 @@ sys.path.insert(0, str(HERE))
 from scan_project import img_size  # noqa: E402
 import style as stylemod  # noqa: E402
 
-SCENE_TYPES = {"shot", "title", "end", "pieces", "list", "quote"}
+SCENE_TYPES = {"shot", "title", "end", "pieces", "list", "quote", "stack", "loop", "carousel", "collage"}
+IMAGE_SCENES = {"loop", "collage"}            # take an "images" list
+DIRECTIONS = {"classic", "showcase", "choreography", "editorial"}
 MOVES = {"macro-drift", "macro-rack", "sweep", "tilt-up", "push-in", "pull-back", "float", "hero-turn", "tilt",
-         "drift", "zoom-in", "zoom-out", "pan-down", "pan-across", "rise"}
-FLAT_MOVES = {"drift", "zoom-in", "zoom-out", "pan-down", "pan-across", "rise", "push-in"}
+         "drift", "zoom-in", "zoom-out", "pan-down", "pan-across", "rise", "spin", "turntable", "punch"}
+FLAT_MOVES = {"drift", "zoom-in", "zoom-out", "pan-down", "pan-across", "rise", "push-in", "punch"}
+DEVICE_ONLY_MOVES = {"spin", "turntable"}        # need a 3D device (phone/browser/window), not a flat panel
 DEVICES = {"phone", "browser", "window", "panel", "none"}
-TRANSITIONS = {"cut", "blur", "whip", "dip", "slide"}
+TRANSITIONS = {"cut", "blur", "whip", "dip", "slide", "zoom", "wipe"}
 ROLES = {"hook", "reveal", "benefit", "proof", "cta", "intro", "work", "service", "about", "process"}
 MACRO = {"macro-drift", "macro-rack", "tilt-up"}
 AI_WORDS = ("unleash", "supercharge", "elevate your", "seamless", "revolutioniz", "next-gen", "game-chang",
@@ -53,6 +56,10 @@ def lint(sb, base):
     if abs(total - target) > 0.51:
         errs.append(f"scene durations sum to {total:.2f}s, expected {target:g}s")
     staging = (sb.get("style") or {}).get("staging") if isinstance(sb.get("style"), dict) else None
+    direction = sb.get("direction", "classic")
+    if direction not in DIRECTIONS: errs.append(f"direction must be one of {sorted(DIRECTIONS)}")
+    def exists(rel, tag, what="file"):
+        if rel and not (base / rel).exists(): errs.append(f"{tag}: {what} not found: {rel}")
     shots = [s for s in scenes if s.get("type") == "shot"]
     if len(shots) >= 3 and len({s.get("move") for s in shots}) < 3:
         warns.append("camera moves repeat a lot - vary them so shots don't feel templated")
@@ -70,14 +77,38 @@ def lint(sb, base):
             if t == "pieces" and not s.get("screen"): errs.append(f"{tag}: needs 'screen' to cut pieces from")
             if s.get("screen") and not (base / s["screen"]).exists():
                 errs.append(f"{tag}: screen not found: {s['screen']}")
+        if s.get("screen2"): exists(s["screen2"], tag, "screen2")
+        if t in IMAGE_SCENES:
+            imgs = s.get("images") or []
+            if len(imgs) < 3: errs.append(f"{tag}: needs at least 3 'images'")
+            for im in imgs: exists(im, tag, "image")
+            if t == "collage" and len(imgs) > 10: warns.append(f"{tag}: only the first 10 images are used")
+        if t == "carousel":
+            items = s.get("items") or []
+            if len(items) < 3: errs.append(f"{tag}: needs at least 3 items ({{image, word}})")
+            for it in items:
+                exists(it.get("image"), tag, "image")
+                if words(it.get("word")) > 1: warns.append(f"{tag}: one word per image reads best: {it.get('word')!r}")
+            if d < 0.45 * len(items): warns.append(f"{tag}: {len(items)} images in {d}s will blur past - add time or drop images")
+        if t == "stack":
+            items = s.get("items") or []
+            if not 2 <= len(items) <= 8: errs.append(f"{tag}: stacks need 2-8 items")
+            if any(it.get("crop") for it in items) and not s.get("screen"): errs.append(f"{tag}: crop items need 'screen'")
+            if s.get("screen"): exists(s["screen"], tag, "screen")
+            for it in items:
+                exists(it.get("icon"), tag, "icon")
+                if words(it.get("text")) > 12: warns.append(f"{tag}: card text over 12 words won't finish typing: {it.get('text')!r}")
+            if d < 0.55 * len(items) + 0.8: warns.append(f"{tag}: {len(items)} cards in {d}s will feel rushed")
         if t == "shot":
             dev = s.get("device", staging or "panel")
+            if s.get("move") in DEVICE_ONLY_MOVES and dev in ("panel", "none"):
+                warns.append(f"{tag}: '{s['move']}' turns a 3D device; on a {dev} it looks wrong - use device phone/browser")
             if dev not in DEVICES: errs.append(f"{tag}: device must be one of {sorted(DEVICES)}")
             if s.get("move") and s["move"] not in MOVES and not s.get("camera"):
                 errs.append(f"{tag}: unknown move {s['move']!r}; use one of {sorted(MOVES)}")
             if dev == "none" and s.get("move") and s["move"] not in FLAT_MOVES:
                 warns.append(f"{tag}: full-bleed shots only pan/zoom; use one of {sorted(FLAT_MOVES)}")
-            if not 2.0 <= d <= 7: warns.append(f"{tag}: {d}s - shots read best between 2 and 7 seconds")
+            if not 1.5 <= d <= 7: warns.append(f"{tag}: {d}s - shots read best between 1.5 and 7 seconds")
             if s.get("screen") and (base / s["screen"]).exists():
                 sz = img_size(base / s["screen"])
                 if sz and dev == "phone" and sz[0] < 700: warns.append(f"{tag}: screen only {sz[0]}px wide - capture at 3x")
@@ -115,6 +146,15 @@ def lint(sb, base):
             text = cap if isinstance(cap, str) else cap.get("text", "")
             if words(text) > 7: warns.append(f"{tag}: caption has {words(text)} words - keep it to 7 or fewer")
     if scenes and scenes[-1].get("type") != "end": warns.append("last scene is not an 'end' card")
+    if direction == "editorial":
+        pics = set()
+        for s in scenes:
+            pics.update(s.get("images") or []); pics.update(it.get("image") for it in s.get("items") or [] if isinstance(it, dict) and it.get("image"))
+        if len(pics) < 8: warns.append(f"direction editorial: only {len(pics)} distinct images - it needs ~10+ strong ones or it looks empty; consider classic")
+    if direction == "showcase" and not any(s.get("device", staging) == "phone" or s.get("move") == "spin" for s in scenes if s.get("type") == "shot"):
+        warns.append("direction showcase: no phone shots - the showcase is built around the device")
+    if direction == "choreography" and not any(s.get("type") == "stack" for s in scenes):
+        warns.append("direction choreography: no 'stack' scene - the hero component should perform at least once")
     # story arc
     subject = sb.get("subject", "product")
     roles = [s.get("role") for s in scenes]
@@ -201,6 +241,10 @@ def prepare_music(sb, sb_path, total):
     if ri is not None: reveal_at = sum(float(s["duration"]) for s in sb["scenes"][:ri])
     mood = sb.get("music_mood") or {"cinematic": "inspiring", "snappy": "driving", "playful": "upbeat",
                                      "calm": "calm"}.get(sb["style"].get("motion"), "inspiring")
+    # file paths are relative to the storyboard (like screens), not to the shell's working folder
+    if spec not in ("auto",) and not str(spec).startswith("library:") and not Path(spec).is_absolute() \
+            and (sb_path.parent / spec).exists():
+        spec = str((sb_path.parent / spec).resolve())
     track = music.resolve(spec, mood)
     print(f"music: {track.stem} (CC0)" if "assets/music" in str(track) or ".cache" in str(track) else f"music: {track}")
     audio, grid = music.fit(track, total, reveal_at=reveal_at)
@@ -214,15 +258,24 @@ def build_page(sb, sb_path, workdir):
     base = sb_path.parent
     media = workdir / "media"; media.mkdir()
     sb = json.loads(json.dumps(sb))
+    def take(i, key, rel):
+        src = (base / rel).resolve()
+        dst = media / f"{i}_{key}{src.suffix}"
+        if not dst.exists(): shutil.copy(src, dst)
+        return f"media/{dst.name}", list(img_size(src) or (1179, 2556))
     for i, s in enumerate(sb["scenes"]):
-        for key in ("screen", "logo"):
+        for key in ("screen", "screen2", "logo"):
             if s.get(key):
-                src = (base / s[key]).resolve()
-                dst = media / f"{i}_{key}{src.suffix}"
-                shutil.copy(src, dst)
-                s[key] = f"media/{dst.name}"
-                if key == "screen":
-                    s["_nat"] = list(img_size(src) or (1179, 2556))
+                s[key], nat = take(i, key, s[key])
+                if key == "screen": s["_nat"] = nat
+                if key == "screen2": s["_nat2"] = nat
+        if s.get("images"):
+            got = [take(i, f"img{k}", rel) for k, rel in enumerate(s["images"])]
+            s["images"], s["_imgnat"] = [g[0] for g in got], [g[1] for g in got]
+        for k, it in enumerate(s.get("items") or []):
+            if not isinstance(it, dict): continue
+            for key in ("image", "icon"):
+                if it.get(key): it[key] = take(i, f"it{k}{key}", it[key])[0]
     html = (ASSETS / "template.html").read_text()
     fonts = {role: (fam, [(Path(p), w, st) for p, w, st in files], src) for role, (fam, files, src) in sb.pop("_fonts").items()}
     html = html.replace("<!--FONTFACES-->", stylemod.fontface_css(fonts, workdir))
